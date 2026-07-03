@@ -20,10 +20,17 @@ body{margin:0;background:var(--bg);color:var(--ink);font-family:"Azeret Mono",ui
   background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);
   background-size:32px 32px;}
 a{color:var(--mag)}
-header{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap;
+header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;
   max-width:1100px;margin:0 auto;padding:28px 24px 8px}
 h1{font-family:Orbitron,sans-serif;font-weight:900;text-transform:uppercase;font-size:22px;letter-spacing:.02em;margin:0}
+.right{display:flex;flex-direction:column;align-items:flex-end;gap:8px}
+.range{display:inline-flex;border:1px solid var(--ink)}
+.range button{font-family:"Azeret Mono",monospace;font-size:12px;letter-spacing:.04em;text-transform:uppercase;
+  background:transparent;color:var(--dim);border:none;border-left:1px solid var(--line);padding:7px 14px;cursor:pointer}
+.range button:first-child{border-left:none}
+.range button.active{background:var(--mag);color:#fff;font-weight:600}
 .who{font-size:12px;color:var(--dim)}
+.section .hint{font-family:"Azeret Mono",monospace;text-transform:none;font-size:11px;color:var(--dim)}
 main{max-width:1100px;margin:0 auto;padding:12px 24px 60px}
 .row{display:grid;gap:14px}
 .stats{grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-bottom:8px}
@@ -69,7 +76,8 @@ function lineChart(series){
   const x=i=>pad+(n<=1?0:i*(W-2*pad)/(n-1)), y=v=>H-pad-(v/max)*(H-2*pad);
   const pts=series.map((p,i)=>x(i).toFixed(1)+','+y(p[1]).toFixed(1)).join(' ');
   const area=pad+','+(H-pad)+' '+pts+' '+x(n-1).toFixed(1)+','+(H-pad);
-  const d0=series[0]?series[0][0].slice(5):'', d1=series[n-1]?series[n-1][0].slice(5):'';
+  const lab=k=>!k?'':(k.includes(' ')?k.slice(11)+':00':k.slice(5));
+  const d0=series[0]?lab(series[0][0]):'', d1=series[n-1]?lab(series[n-1][0]):'';
   return '<svg viewBox="0 0 '+W+' '+H+'">'+
     '<defs><linearGradient id="g" x1="0" x2="0" y1="0" y2="1">'+
     '<stop offset="0" stop-color="#ff1e79" stop-opacity=".22"/><stop offset="1" stop-color="#ff1e79" stop-opacity="0"/></linearGradient></defs>'+
@@ -91,24 +99,31 @@ const fmt=(n)=>n>=1000?(n/1000).toFixed(1)+'k':(Number.isInteger(n)?n:n.toFixed(
 const esc=(s)=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const sum=(s)=>s.reduce((a,p)=>a+p[1],0);
 
-function render(d,email){
+let EMAIL='';
+const RLABEL={day:'· last 24 hours, hourly',week:'· last 7 days, daily',month:'· last 30 days, daily',all:'· all time, daily'};
+
+function render(d){
   const stat=(big,lab,sub)=>'<div class="card stat"><div class="big">'+big+'</div><div class="sub">'+lab+(sub?' · '+sub:'')+'</div></div>';
-  const h=d.headline;
-  const plotCards=d.plots.map(p=>'<div class="card"><h3>'+esc(p.label)+' <span style="color:var(--ink)">· '+fmt(sum(p.series))+' total</span></h3>'+lineChart(p.series)+'</div>').join('');
+  const h=d.headline, tail=d.range==='day'?' today':'';
+  const plotCards=d.plots.map(p=>'<div class="card"><h3>'+esc(p.label)+' <span style="color:var(--ink)">· '+fmt(sum(p.series))+tail+'</span></h3>'+lineChart(p.series)+'</div>').join('');
   const budgetPct=Math.min(100,d.budget.capPct);
+  const rangeBtns=['day','week','month','all'].map(r=>'<button data-r="'+r+'"'+(r===d.range?' class="active"':'')+'>'+r+'</button>').join('');
   document.getElementById('app').innerHTML=
-    '<header><h1>clanker · analytics</h1><span class="who">'+esc(email)+' · <a href="https://howclankerareyou.com/auth/logout?next='+encodeURIComponent(location.href)+'">sign out</a></span></header>'+
+    '<header><h1>clanker · analytics</h1><div class="right">'+
+      '<div class="range" id="range">'+rangeBtns+'</div>'+
+      '<span class="who">'+esc(EMAIL)+' · <a href="https://howclankerareyou.com/auth/logout?next='+encodeURIComponent(location.href)+'">sign out</a></span>'+
+    '</div></header>'+
     '<main>'+
     '<div class="row stats">'+
       stat(h.completedRuns,'runs completed')+
       stat(h.completionRate+'%','completion rate','started→finished')+
       stat(h.shareRate+'%','share rate','of completed')+
       stat(h.kFactor,'k-factor','opens per share')+
-      stat('$'+h.mtdSpend,'spend (MTD)')+
+      stat('$'+h.spend,'spend')+
     '</div>'+
     '<div class="card"><h3>HF budget — '+d.budget.todayCalls+' / '+d.budget.dailyCap+' calls today ('+d.budget.capPct+'% of daily cap) · $'+d.budget.mtdSpend+' month-to-date</h3><div class="budget"><div style="width:'+budgetPct+'%"></div></div></div>'+
-    '<div class="section">trends</div><div class="row grid">'+plotCards+'</div>'+
-    '<div class="section">breakdowns</div><div class="row grid">'+
+    '<div class="section"><span>trends <span class="hint">'+(RLABEL[d.range]||'')+'</span></span></div><div class="row grid">'+plotCards+'</div>'+
+    '<div class="section"><span>breakdowns <span class="hint">· all time</span></span></div><div class="row grid">'+
       '<div class="card"><h3>Funnel — sessions reaching each question</h3>'+bars(d.funnel.map(f=>({l:'Q'+f.step+' '+f.prompt.slice(0,22)+'…',v:f.sessions})),'l','v')+'</div>'+
       '<div class="card"><h3>Clanker-score distribution</h3>'+bars(d.scoreHistogram.map(b=>({l:b.bucket+'%',v:b.count})),'l','v')+'</div>'+
       '<div class="card"><h3>Inner-clanker model (nearest)</h3>'+bars(d.modelShare,'label','count')+'</div>'+
@@ -117,14 +132,20 @@ function render(d,email){
     '</div>'+
     '<p class="muted" style="margin-top:20px">updated '+new Date(d.updated).toLocaleString()+'</p>'+
     '</main>';
+  document.getElementById('range').addEventListener('click',e=>{const b=e.target.closest('button');if(b)load(b.dataset.r);});
+}
+
+async function load(range){
+  try{ render(await getJSON('/api/analytics?range='+encodeURIComponent(range))); }
+  catch(e){ login(); }
 }
 
 (async()=>{
   try{
     const me=await getJSON('/api/me');
     if(!me.admin){login();return;}
-    const data=await getJSON('/api/analytics');
-    render(data,me.email);
+    EMAIL=me.email;
+    load('week');
   }catch(e){ login(); }
 })();
 </script>

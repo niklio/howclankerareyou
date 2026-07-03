@@ -1,130 +1,137 @@
-// Analytics aggregation for the admin dashboard. Everything is derived from the
-// product tables (sessions, answers, results, usage) plus the lightweight
-// `events` table (pageviews, result-page opens, share taps).
+// Analytics aggregation for the admin dashboard. Trend charts + headline stats
+// are scoped to a time range (day/week/month/all); breakdowns stay all-time.
+// Everything is derived from the product tables (sessions, answers, results,
+// usage) plus the lightweight `events` table (pageviews, result-page opens,
+// share taps). All bucketing is UTC.
 import { QUESTIONS } from './questions.js';
 import { MODELS } from './scoring.js';
 
 // Estimated cost per model API call: measured avg input tokens × provider
-// input rate + 1 output token × output rate (USD). Provider rates pulled from
-// the HF router; see README. Used for the spend/budget graphs.
+// input rate + 1 output token × output rate (USD). Rates from the HF router.
 const COST_PER_CALL = {
   'meta-llama/Llama-3.1-8B-Instruct:nscale': 82 * 0.06e-6 + 0.06e-6,
   'deepseek-ai/DeepSeek-V3-0324:novita': 48 * 0.27e-6 + 1.12e-6,
   'Qwen/Qwen3-235B-A22B-Instruct-2507:nscale': 60 * 0.2e-6 + 0.6e-6,
 };
 const DEFAULT_COST = 1.1e-5;
+const RANGES = new Set(['day', 'week', 'month', 'all']);
 
-const day = (msExpr) => `strftime('%Y-%m-%d', ${msExpr}/1000, 'unixepoch')`;
+const dayExpr = (ms) => `strftime('%Y-%m-%d', ${ms}/1000, 'unixepoch')`;
 const today = () => new Date().toISOString().slice(0, 10);
 
-function daysBetween(start, end) {
-  const out = [];
-  const d = new Date(start + 'T00:00:00Z');
-  const e = new Date(end + 'T00:00:00Z');
-  while (d <= e) {
-    out.push(d.toISOString().slice(0, 10));
-    d.setUTCDate(d.getUTCDate() + 1);
+// Bucket keys + the SQL bucket expression and window condition for a range.
+// day → 24 hourly buckets over the last 24h; else → daily buckets.
+function buildBuckets(range, earliestMs) {
+  const now = Date.now();
+  if (range === 'day') {
+    const startMs = now - 24 * 3600 * 1000;
+    const keys = [];
+    for (let i = 23; i >= 0; i--) keys.push(new Date(now - i * 3600 * 1000).toISOString().slice(0, 13).replace('T', ' '));
+    return { keys, bucket: (m) => `strftime('%Y-%m-%d %H', ${m}/1000, 'unixepoch')`, cond: (m) => `${m} >= ${startMs}` };
   }
-  return out;
+  const startMs =
+    range === 'week' ? now - 6 * 86400 * 1000 : range === 'month' ? now - 29 * 86400 * 1000 : earliestMs;
+  const keys = [];
+  const start = new Date(new Date(startMs).toISOString().slice(0, 10) + 'T00:00:00Z');
+  const end = new Date(today() + 'T00:00:00Z');
+  for (const d = start; d <= end; d.setUTCDate(d.getUTCDate() + 1)) keys.push(d.toISOString().slice(0, 10));
+  return { keys, bucket: dayExpr, cond: range === 'all' ? () => '1' : (m) => `${m} >= ${startMs}` };
 }
 
-const fill = (rows, days, key = 'n') => {
-  const m = Object.fromEntries(rows.map((r) => [r.d, r[key]]));
-  return days.map((d) => [d, m[d] || 0]);
-};
-
-export async function gatherAnalytics(env) {
+export async function gatherAnalytics(env, range = 'week') {
+  if (!RANGES.has(range)) range = 'week';
   const q = async (sql) => (await env.DB.prepare(sql).all()).results || [];
 
-  const started = await q(`SELECT ${day('created_at')} d, COUNT(*) n FROM sessions GROUP BY d`);
-  const completed = await q(`SELECT ${day('created_at')} d, COUNT(*) n FROM results GROUP BY d`);
-  const pageviews = await q(`SELECT day d, COUNT(*) n FROM events WHERE type='pageview' GROUP BY d`);
-  const uniques = await q(`SELECT day d, COUNT(DISTINCT visitor) n FROM events WHERE type='pageview' GROUP BY d`);
-  const resultViews = await q(`SELECT day d, COUNT(*) n FROM events WHERE type='result_view' GROUP BY d`);
-  const shares = await q(`SELECT day d, COUNT(*) n FROM events WHERE type='share' GROUP BY d`);
-  const calls = await q(`SELECT ${day('created_at')} d, SUM(steps) n FROM answers a JOIN sessions s ON a.session_id=s.id GROUP BY d`);
-  const callsByModelDay = await q(`SELECT ${day('created_at')} d, model, SUM(steps) n FROM answers a JOIN sessions s ON a.session_id=s.id GROUP BY d, model`);
-
-  // Date window: earliest activity → today (UTC), zero-filled.
-  const allDays = [started, completed, pageviews].flat().map((r) => r.d).filter(Boolean);
-  const start = allDays.length ? allDays.sort()[0] : today();
-  const days = daysBetween(start, today());
-
-  // Spend per day = Σ per-model calls × cost/call.
-  const spendByDay = {};
-  for (const r of callsByModelDay) {
-    spendByDay[r.d] = (spendByDay[r.d] || 0) + r.n * (COST_PER_CALL[r.model] ?? DEFAULT_COST);
+  let earliestMs = Date.now();
+  if (range === 'all') {
+    const e = await q(
+      `SELECT MIN(m) m FROM (SELECT MIN(created_at) m FROM sessions UNION SELECT MIN(ts) m FROM events)`
+    );
+    earliestMs = e[0]?.m || Date.now();
   }
-  const spendSeries = days.map((d) => [d, Math.round((spendByDay[d] || 0) * 1e6) / 1e6]);
+  const { keys, bucket, cond } = buildBuckets(range, earliestMs);
+  const fillK = (rows) => {
+    const m = Object.fromEntries(rows.map((r) => [r.d, r.n]));
+    return keys.map((k) => [k, m[k] || 0]);
+  };
+  const seriesQ = async (sql) => fillK(await q(sql));
+  const sum = (s) => s.reduce((a, p) => a + p[1], 0);
 
-  // Funnel: how many sessions reach each question (in prompt order).
+  // --- windowed trend series ---
+  const started = await seriesQ(`SELECT ${bucket('created_at')} d, COUNT(*) n FROM sessions WHERE ${cond('created_at')} GROUP BY d`);
+  const completed = await seriesQ(`SELECT ${bucket('created_at')} d, COUNT(*) n FROM results WHERE ${cond('created_at')} GROUP BY d`);
+  const pageviews = await seriesQ(`SELECT ${bucket('ts')} d, COUNT(*) n FROM events WHERE type='pageview' AND ${cond('ts')} GROUP BY d`);
+  const uniques = await seriesQ(`SELECT ${bucket('ts')} d, COUNT(DISTINCT visitor) n FROM events WHERE type='pageview' AND ${cond('ts')} GROUP BY d`);
+  const resultViews = await seriesQ(`SELECT ${bucket('ts')} d, COUNT(*) n FROM events WHERE type='result_view' AND ${cond('ts')} GROUP BY d`);
+  const shares = await seriesQ(`SELECT ${bucket('ts')} d, COUNT(*) n FROM events WHERE type='share' AND ${cond('ts')} GROUP BY d`);
+  const calls = await seriesQ(`SELECT ${bucket('s.created_at')} d, SUM(steps) n FROM answers a JOIN sessions s ON a.session_id=s.id WHERE ${cond('s.created_at')} GROUP BY d`);
+
+  const cbm = await q(`SELECT ${bucket('s.created_at')} d, model, SUM(steps) n FROM answers a JOIN sessions s ON a.session_id=s.id WHERE ${cond('s.created_at')} GROUP BY d, model`);
+  const spendBy = {};
+  for (const r of cbm) spendBy[r.d] = (spendBy[r.d] || 0) + r.n * (COST_PER_CALL[r.model] ?? DEFAULT_COST);
+  const spendSeries = keys.map((k) => [k, Math.round((spendBy[k] || 0) * 1e6) / 1e6]);
+
+  // --- headline (windowed sums) ---
+  const totalStarted = sum(started);
+  const totalCompleted = sum(completed);
+  const totalShares = sum(shares);
+  const totalResultViews = sum(resultViews);
+
+  // --- breakdowns (all-time) ---
   const funnelRows = await q(`SELECT question_id, COUNT(DISTINCT session_id) n FROM answers GROUP BY question_id`);
   const funnelMap = Object.fromEntries(funnelRows.map((r) => [r.question_id, r.n]));
   const funnel = QUESTIONS.map((qq, i) => ({ step: i + 1, prompt: qq.prompt, sessions: funnelMap[qq.id] || 0 }));
 
-  // Per-question clanker-ness (mean surprisal; lower = more clanker).
-  const qk = await q(`SELECT question_id, AVG(avg_kl) k, COUNT(*) n FROM answers GROUP BY question_id`);
+  const qk = await q(`SELECT question_id, AVG(avg_kl) k FROM answers GROUP BY question_id`);
   const qkMap = Object.fromEntries(qk.map((r) => [r.question_id, r.k]));
   const questionClanker = QUESTIONS.filter((qq) => qkMap[qq.id] != null)
     .map((qq) => ({ prompt: qq.prompt, avgKl: Math.round(qkMap[qq.id] * 100) / 100 }))
     .sort((a, b) => a.avgKl - b.avgKl);
 
-  // Score distribution + "inner clanker" model share, from finished results.
   const resultRows = await q(`SELECT overall, per_model FROM results`);
   const hist = Array.from({ length: 10 }, (_, i) => ({ bucket: `${i * 10}-${i * 10 + 10}`, count: 0 }));
   const modelCount = Object.fromEntries(MODELS.map((m) => [m.label, 0]));
   for (const r of resultRows) {
-    const b = Math.min(9, Math.max(0, Math.floor(r.overall / 10)));
-    hist[b].count++;
+    hist[Math.min(9, Math.max(0, Math.floor(r.overall / 10)))].count++;
     try {
-      const pm = JSON.parse(r.per_model);
-      const top = pm.sort((a, b) => b.score - a.score)[0];
+      const top = JSON.parse(r.per_model).sort((a, b) => b.score - a.score)[0];
       if (top && modelCount[top.label] != null) modelCount[top.label]++;
     } catch {}
   }
   const modelShare = Object.entries(modelCount).map(([label, count]) => ({ label, count }));
-
-  // Referrers (pageviews with a known source).
   const referrers = await q(
     `SELECT COALESCE(ref,'direct') ref, COUNT(*) n FROM events WHERE type='pageview' GROUP BY ref ORDER BY n DESC LIMIT 10`
   );
 
-  // Budget: month-to-date model calls + spend, vs the daily cap.
+  // --- budget (operational: today's cap + month-to-date, range-independent) ---
   const monthStart = today().slice(0, 8) + '01';
-  const mtdCallsRow = await q(
-    `SELECT SUM(steps) n FROM answers a JOIN sessions s ON a.session_id=s.id WHERE ${day('created_at')} >= '${monthStart}'`
+  const mtdCallsRow = await q(`SELECT SUM(steps) n FROM answers a JOIN sessions s ON a.session_id=s.id WHERE ${dayExpr('s.created_at')} >= '${monthStart}'`);
+  const mtdSpend = (await q(`SELECT model, SUM(steps) n FROM answers a JOIN sessions s ON a.session_id=s.id WHERE ${dayExpr('s.created_at')} >= '${monthStart}' GROUP BY model`)).reduce(
+    (s, r) => s + r.n * (COST_PER_CALL[r.model] ?? DEFAULT_COST),
+    0
   );
-  const mtdSpend = Object.entries(
-    (await q(
-      `SELECT model, SUM(steps) n FROM answers a JOIN sessions s ON a.session_id=s.id WHERE ${day('created_at')} >= '${monthStart}' GROUP BY model`
-    )).reduce((acc, r) => ((acc[r.model] = r.n), acc), {})
-  ).reduce((s, [m, n]) => s + n * (COST_PER_CALL[m] ?? DEFAULT_COST), 0);
   const capRow = await q(`SELECT calls FROM usage WHERE day='${today()}'`);
   const cap = Number(env.DAILY_CALL_CAP || 0);
 
-  const totalStarted = started.reduce((s, r) => s + r.n, 0);
-  const totalCompleted = completed.reduce((s, r) => s + r.n, 0);
-  const totalShares = shares.reduce((s, r) => s + r.n, 0);
-  const totalResultViews = resultViews.reduce((s, r) => s + r.n, 0);
-
   return {
     updated: new Date().toISOString(),
+    range,
     headline: {
       completedRuns: totalCompleted,
       completionRate: totalStarted ? Math.round((100 * totalCompleted) / totalStarted) : 0,
       shareRate: totalCompleted ? Math.round((100 * totalShares) / totalCompleted) : 0,
       kFactor: totalShares ? Math.round((100 * totalResultViews) / totalShares) / 100 : 0,
-      mtdSpend: Math.round(mtdSpend * 100) / 100,
+      spend: Math.round(sum(spendSeries) * 100) / 100,
     },
     plots: [
-      { label: 'Diagnostics started', series: fill(started, days) },
-      { label: 'Runs completed', series: fill(completed, days) },
-      { label: 'Page views', series: fill(pageviews, days) },
-      { label: 'Unique visitors', series: fill(uniques, days) },
-      { label: 'Result-page opens (shares landing)', series: fill(resultViews, days) },
-      { label: 'Share actions', series: fill(shares, days) },
-      { label: 'Model API calls', series: fill(calls, days) },
-      { label: 'Estimated spend ($/day)', series: spendSeries },
+      { label: 'Diagnostics started', series: started },
+      { label: 'Runs completed', series: completed },
+      { label: 'Page views', series: pageviews },
+      { label: 'Unique visitors', series: uniques },
+      { label: 'Result-page opens', series: resultViews },
+      { label: 'Share actions', series: shares },
+      { label: 'Model API calls', series: calls },
+      { label: 'Estimated spend ($)', series: spendSeries },
     ],
     funnel,
     scoreHistogram: hist,

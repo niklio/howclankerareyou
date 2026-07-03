@@ -108,7 +108,8 @@ async function analyticsHost(request, env, url) {
     const admin = auth.isAdmin(env, email);
     if (url.pathname === '/api/me') return json({ email: email || null, admin });
     if (!admin) return json({ error: 'forbidden' }, 403);
-    if (url.pathname === '/api/analytics') return json(await gatherAnalytics(env));
+    if (url.pathname === '/api/analytics')
+      return json(await gatherAnalytics(env, url.searchParams.get('range') || 'week'));
     return json({ error: 'not found' }, 404);
   }
   if (url.pathname === '/favicon.svg') return env.ASSETS.fetch(new Request(CANONICAL + '/favicon.svg'));
