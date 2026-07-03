@@ -1,37 +1,108 @@
 # how clanker are you?
 
-A KL-divergence Turing test, reversed — live at
-**[howclankerareyou.com](https://howclankerareyou.com)**.
+**A reverse Turing test.** Finish a few sentences, and three language models
+measure the KL divergence between how *you* write and how *they* would — then
+tell you how much clanker (robot) is in you.
 
-You finish eight sentences. For every word you type, three LLMs
-(Llama 3.1 8B, DeepSeek V3, Qwen3 235B) report their top-20 next-token
-logprobs conditioned on your actual text so far. Your words are one-hot
-next-token distributions, so per-token KL(you ‖ model) collapses to
-−log p_model(your token). Averaged over tokens and questions, that's your
-divergence from each model — and your **clanker score** is how close you got.
+**Live → [howclankerareyou.com](https://howclankerareyou.com)**
 
-## How scoring works
+<a href="https://howclankerareyou.com"><img src="https://img.shields.io/badge/live-howclankerareyou.com-ff1e79" alt="live site"></a>
+<img src="https://img.shields.io/badge/stack-Cloudflare_Workers_%2B_D1-f38020" alt="stack">
+<a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-14110f" alt="MIT license"></a>
 
-- **No tokenizers, client or server.** The Worker walks your completion
-  greedily: request the top-20 next tokens for the current prefix, match the
-  longest candidate against your remaining text, record its logprob, append
-  **your** words to the prefix, repeat (`src/scoring.js`). Tokens outside the
-  top-20 are floored just below the 20th candidate.
-- **Score mapping.** `100 · exp(−max(0, D − d0) / 1.4)`, where D is your mean
-  nats/token under a model and `d0` is that model's "generic-LLM" anchor (its
-  self-completion baseline + ~1.7, the level a *foreign* frontier LLM's text
-  sits at). Overall score = your nearest model's (divergence to an ensemble is
-  a min). Calibration: any-LLM paste ≈ 100%, quirky human answers ≈ 20%.
-- **Per-word heat grid.** The same per-token logprobs roll up into a per-word
-  divergence, colored green (human/surprising) → red (clanker/predictable),
-  and shared as a Wordle-style emoji grid.
+<table>
+  <tr>
+    <td width="50%"><img src="docs/landing.png" alt="Landing page"></td>
+    <td width="50%"><img src="docs/results.png" alt="Results page with the shareable heat grid"></td>
+  </tr>
+</table>
 
-## Stack
+---
 
-Cloudflare Worker (vanilla JS) + static assets + D1. No framework, no build.
-Inference via the HuggingFace Inference Providers router (HF PRO), with each
-model pinned to a backend that returns logprobs and accepts an assistant
-prefix. `src/mock.js` is a deterministic fallback used when `HF_TOKEN` is unset.
+## The idea
+
+Language models are next-token predictors. Give one a prefix and it returns a
+probability distribution over what comes next. When *you* finish a sentence,
+you commit to exactly one next token each step — a **one-hot distribution**.
+
+That collapses the math to something clean. The KL divergence between your
+one-hot choice and the model's distribution at each position is just:
+
+```
+KL(you ‖ model) = −log p_model(your token)
+```
+
+Average that over every token you typed and you have a single number: how
+surprising your writing is to a language model. Low divergence means you write
+like a model (**clanker**); high divergence means you surprised it
+(**human**). It's a Turing test pointed backwards — instead of asking a machine
+to imitate a human, it asks how well a human imitates a machine.
+
+## How the scoring actually works
+
+The tricky part: turning free text into per-token divergences without running a
+tokenizer on either side. The Worker walks your completion greedily
+([`src/scoring.js`](src/scoring.js)):
+
+1. Ask the model for its **top-20 next tokens** given the prompt + your text so
+   far, with logprobs.
+2. Match the **longest candidate** that's a literal prefix of your remaining
+   text; record its logprob.
+3. Append *your* words to the running prefix and repeat.
+4. Tokens outside the top-20 are **floored** just below the 20th candidate, so
+   genuinely surprising words are penalized but not infinitely.
+
+Every step is conditioned on what you actually wrote, and word boundaries are
+the user's own — so the per-token logprobs also roll up into a **per-word
+divergence**, which drives the Wordle-style heat grid (green = human, red =
+clanker) and its shareable emoji export.
+
+## Calibration — the interesting failure
+
+The naive anchor for "100% clanker" is a model's *own* output (it scores its own
+text as maximally likely). But the panel is Llama / DeepSeek / Qwen, and most
+people paste from **GPT or Claude** — whose text is foreign to all three. Early
+on, ChatGPT completions scored a mushy ~54%.
+
+The fix was to re-anchor the "100%" point to the *generic frontier-LLM* level
+(each model's self-baseline **+ ~1.7 nats**, measured empirically), and steepen
+the falloff. Now any-LLM paste lands ~100% and quirky human writing ~20%, with
+the honest tradeoff that bland human prose lands mid-range — because bland prose
+genuinely does read like an LLM.
+
+## Architecture
+
+```
+browser ── howclankerareyou.com ── Cloudflare Worker ─┬─ static SPA (assets)
+                                                       ├─ D1 (sessions, answers, results, usage)
+                                                       └─ HF Inference Providers router
+                                                            ├─ Llama 3.1 8B   (Meta)
+                                                            ├─ DeepSeek V3     (DeepSeek)
+                                                            └─ Qwen3 235B      (Alibaba)
+```
+
+- **Serverless, no build step, no framework.** Vanilla JS Worker + static
+  assets. The whole app cold-starts at the edge.
+- **Real logprobs** come from the HuggingFace Inference Providers router, each
+  model pinned to a backend that returns top-20 logprobs and accepts an
+  assistant-prefixed continuation. `src/mock.js` is a deterministic fallback so
+  the site stays playable without credits.
+- **Shareable results** persist in D1; anyone can open `/r/:id` to see a run,
+  and the taker vs. shared-link views differ.
+
+## Production concerns
+
+- **Abuse guards:** per-IP rate limits on session creation and scoring
+  (Cloudflare rate-limit bindings), plus a D1-counted **global daily call cap**
+  as a backstop against distributed abuse that per-IP limits miss.
+- **Cost:** a full 8-question run is ~99 model calls ≈ **$0.001** at current
+  provider rates — ~1,800 runs on the platform's included monthly credit, with
+  a hard spend ceiling (no pay-as-you-go attached).
+- **Resilience:** when a Cloudflare Durable-Objects incident degraded the
+  database's region, the D1 was migrated to a healthy region with a one-line
+  config change (the app rebinds by name, no code change).
+
+## Project layout
 
 ```
 src/index.js      API: /api/session, /api/score, /api/finish, /api/result/:id, /api/status
@@ -39,35 +110,31 @@ src/scoring.js    greedy top-k matching, KL, per-word heat, calibrated score map
 src/mock.js       deterministic stand-in for the logprobs endpoint
 src/questions.js  server-side question bank
 public/           landing → quiz → results SPA, favicon/OG/SEO assets
-schema.sql        D1 tables (sessions, answers, results, usage)
+schema.sql        D1 tables
 ```
 
-## Abuse protection
+## Run it locally
 
-- Per-IP rate limits on `/api/session` (20/min) and `/api/score` (40/min) via
-  Cloudflare rate-limit bindings.
-- A global daily scoring-call cap (`DAILY_CALL_CAP`, D1-counted) as a backstop
-  against distributed abuse that per-IP limits miss.
-- Input bounds: fixed question/model lists, 80-char completion cap, ≤10 greedy
-  steps per answer.
-- The real dollar ceiling is HuggingFace's own spending limit — set one.
-
-## Dev
-
-```
-echo 'MOCK_INFERENCE=0'          > .dev.vars   # or MOCK_INFERENCE=1 for the mock
-echo "HF_TOKEN=hf_…"            >> .dev.vars
+```bash
+npm install
+printf 'MOCK_INFERENCE=1\n' > .dev.vars          # deterministic mock, no API key
 npx wrangler d1 execute howclankerareyou-wnam --local --file schema.sql
 npm run dev
 ```
 
-## Deploy
+For real inference, set `MOCK_INFERENCE=0` and add a HuggingFace token
+(`HF_TOKEN=hf_…`) to `.dev.vars`.
 
-```
-npx wrangler d1 execute howclankerareyou-wnam --remote --file schema.sql
-npx wrangler secret put HF_TOKEN
-npm run deploy
-```
+## Notes & limitations
 
-The D1 database lives in the WNAM region (moved off ENAM during a Cloudflare
-Durable-Objects incident); the previous ENAM id is noted in `wrangler.toml`.
+- Small open models can't perfectly separate careful human writing from LLM
+  writing — the score is a fun signal, not a detector. Genuinely quirky answers
+  are the reliable way to score low.
+- The per-word heat grid uses each model's raw divergence; the headline score is
+  calibrated and takes the *nearest* model (divergence to an ensemble is a min).
+- Adding an OpenAI/Anthropic model to the panel would tighten scoring for text
+  pasted from those specific families, at the cost of a paid logprobs endpoint.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
