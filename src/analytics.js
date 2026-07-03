@@ -62,7 +62,7 @@ export async function gatherAnalytics(env) {
   const funnelMap = Object.fromEntries(funnelRows.map((r) => [r.question_id, r.n]));
   const funnel = QUESTIONS.map((qq, i) => ({ step: i + 1, prompt: qq.prompt, sessions: funnelMap[qq.id] || 0 }));
 
-  // Per-question clanker-ness (mean divergence; lower = more clanker).
+  // Per-question clanker-ness (mean surprisal; lower = more clanker).
   const qk = await q(`SELECT question_id, AVG(avg_kl) k, COUNT(*) n FROM answers GROUP BY question_id`);
   const qkMap = Object.fromEntries(qk.map((r) => [r.question_id, r.k]));
   const questionClanker = QUESTIONS.filter((qq) => qkMap[qq.id] != null)

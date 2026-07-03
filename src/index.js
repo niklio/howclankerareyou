@@ -287,7 +287,7 @@ async function api(request, env, url, ctx) {
         questions: mine.length,
       };
     }).filter(Boolean);
-    // Divergence to the model ensemble is the min over members, so the overall
+    // Surprisal to the ensemble is a min over members (nearest model), so the overall
     // score is the nearest model's — your inner clanker sets your number.
     const overall = Math.max(...perModel.map((m) => m.score));
     const grid = buildGrid(rows);
@@ -323,7 +323,7 @@ async function api(request, env, url, ctx) {
 }
 
 // Build the shareable heat grid: one row per answered question, one cell per
-// word, colored by the word's divergence averaged across models (green =
+// word, colored by the word's surprisal averaged across models (green =
 // human/surprising, red = clanker/predictable).
 function buildGrid(rows) {
   const grid = [];
@@ -344,7 +344,7 @@ function buildGrid(rows) {
       const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
       return heatLevel(mean);
     });
-    // Per-question divergence (mean across models) so the share page can rank
+    // Per-question surprisal (mean across models) so the share page can rank
     // most-clanker vs least-clanker answers.
     const kl = Math.round((answers.reduce((s, r) => s + r.avg_kl, 0) / answers.length) * 100) / 100;
     grid.push({ prompt: q.prompt, answer: words.join(' '), cells, kl });

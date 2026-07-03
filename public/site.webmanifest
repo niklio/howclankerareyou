@@ -1,7 +1,7 @@
 {
   "name": "how clanker are you?",
   "short_name": "clanker",
-  "description": "A reverse Turing test: measure the KL divergence between you and the machines.",
+  "description": "A reverse Turing test: how surprising is your writing to the machines?",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#f2efe6",

@@ -1,8 +1,8 @@
 # how clanker are you?
 
 **A reverse Turing test.** Finish a few sentences, and three language models
-measure the KL divergence between how *you* write and how *they* would — then
-tell you how much clanker (robot) is in you.
+measure the **surprisal** of your writing — how well they predicted each word
+you typed — then tell you how much clanker (robot) is in you.
 
 **Live → [howclankerareyou.com](https://howclankerareyou.com)**
 
@@ -22,25 +22,32 @@ tell you how much clanker (robot) is in you.
 ## The idea
 
 Language models are next-token predictors. Give one a prefix and it returns a
-probability distribution over what comes next. When *you* finish a sentence,
-you commit to exactly one next token each step — a **one-hot distribution**.
-
-That collapses the math to something clean. The KL divergence between your
-one-hot choice and the model's distribution at each position is just:
+probability distribution over what comes next. Each word you actually type has a
+**surprisal** under that distribution — the standard psycholinguistics term for
+how unexpected an observed event is:
 
 ```
-KL(you ‖ model) = −log p_model(your token)
+surprisal(word) = −log p_model(word)
 ```
 
-Average that over every token you typed and you have a single number: how
-surprising your writing is to a language model. Low divergence means you write
-like a model (**clanker**); high divergence means you surprised it
-(**human**). It's a Turing test pointed backwards — instead of asking a machine
-to imitate a human, it asks how well a human imitates a machine.
+Average it over every word you typed and you get one number: how surprising your
+writing is to a language model. **Low surprisal** means the model saw you coming
+(**clanker**); **high surprisal** means you caught it off guard (**human**). It's
+a Turing test pointed backwards — instead of asking a machine to imitate a human,
+it asks how well a human imitates a machine.
+
+> **Isn't this just perplexity / KL?** It's mean per-word surprisal, i.e.
+> cross-entropy of your text under the model — the same family, named honestly.
+> Your finished sentence is a sequence of one-hot next-word choices, and the KL
+> divergence from each one-hot choice to the model's distribution collapses to
+> exactly that word's surprisal. Calling the headline metric "KL divergence"
+> would dress up per-word cross-entropy as a distance between two rich
+> distributions, which it isn't — so the metric is surprisal, and this is the
+> footnote.
 
 ## How the scoring actually works
 
-The tricky part: turning free text into per-token divergences without running a
+The tricky part: turning free text into per-token surprisals without running a
 tokenizer on either side. The Worker walks your completion greedily
 ([`src/scoring.js`](src/scoring.js)):
 
@@ -54,7 +61,7 @@ tokenizer on either side. The Worker walks your completion greedily
 
 Every step is conditioned on what you actually wrote, and word boundaries are
 the user's own — so the per-token logprobs also roll up into a **per-word
-divergence**, which drives the Wordle-style heat grid (green = human, red =
+surprisal**, which drives the Wordle-style heat grid (green = human, red =
 clanker) and its shareable emoji export.
 
 ## Calibration — the interesting failure
@@ -111,7 +118,7 @@ browser ── howclankerareyou.com ── Cloudflare Worker ─┬─ static SP
 
 ```
 src/index.js      API: /api/session, /api/score, /api/finish, /api/result/:id, /api/status
-src/scoring.js    greedy top-k matching, KL, per-word heat, calibrated score mapping
+src/scoring.js    greedy top-k matching, surprisal, per-word heat, calibrated score mapping
 src/mock.js       deterministic stand-in for the logprobs endpoint
 src/questions.js  server-side question bank
 public/           landing → quiz → results SPA, favicon/OG/SEO assets
@@ -135,8 +142,8 @@ For real inference, set `MOCK_INFERENCE=0` and add a HuggingFace token
 - Small open models can't perfectly separate careful human writing from LLM
   writing — the score is a fun signal, not a detector. Genuinely quirky answers
   are the reliable way to score low.
-- The per-word heat grid uses each model's raw divergence; the headline score is
-  calibrated and takes the *nearest* model (divergence to an ensemble is a min).
+- The per-word heat grid uses each model's raw surprisal; the headline score is
+  calibrated and takes the *nearest* (least-surprised) model.
 - Adding an OpenAI/Anthropic model to the panel would tighten scoring for text
   pasted from those specific families, at the cost of a paid logprobs endpoint.
 

@@ -1,6 +1,9 @@
-// Per-token KL scoring against hosted models via the HuggingFace Inference
-// Providers router. The user's completion is a sequence of one-hot next-token
-// samples; KL(user ‖ model) at each position collapses to -log p_model(token).
+// Per-token surprisal scoring against hosted models via the HuggingFace
+// Inference Providers router. Each token the user typed has a surprisal
+// −log p_model(token) under the model's distribution — how unexpected it was.
+// (Equivalently, the KL from the user's one-hot next-token choice to the
+// model's distribution collapses to exactly that surprisal.) Field names in
+// the schema/API keep the historical `avg_kl` label; only the framing changed.
 //
 // We never tokenize the user's text ourselves. Instead we walk it greedily:
 // ask the model for its top-20 next tokens given (prompt + text consumed so
@@ -16,7 +19,7 @@ import { mockTopLogprobs } from './mock.js';
 
 const ROUTER = 'https://router.huggingface.co/v1/chat/completions';
 
-// d0 = the "generic LLM" divergence anchor (nats/token): the level at which a
+// d0 = the "generic LLM" surprisal anchor (nats/token): the level at which a
 // strong assistant's completion sits under this model. Text at or below d0
 // scores ~100% clanker. This is the panel model's self-completion baseline
 // (Llama 4.0 / DeepSeek 2.5 / Qwen 6.0) PLUS ~1.7 — because a foreign LLM's
@@ -60,7 +63,7 @@ export async function scoreModel(env, model, promptText, completion) {
   const perStep = [];
 
   // Word spans over the (space-prefixed) completion, so we can roll the
-  // per-token logprobs up into a per-word divergence for the share grid.
+  // per-token logprobs up into a per-word surprisal for the share grid.
   // Token boundaries differ per model, but words are the user's own, so
   // per-word values align across models.
   const source = ' ' + completion.trim();
@@ -103,7 +106,7 @@ export async function scoreModel(env, model, promptText, completion) {
   return { avgKL, steps: perStep.length, perStep, perWord };
 }
 
-// Per-word divergence (nats) → heat level for the share grid.
+// Per-word surprisal (nats) → heat level for the share grid.
 // 0 red = clanker (predictable), 3 green = human (surprising).
 export function heatLevel(kl) {
   if (kl == null) return null;

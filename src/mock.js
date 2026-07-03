@@ -1,6 +1,6 @@
 // Deterministic stand-in for a real logprobs endpoint, used while OpenRouter
 // credits are unfunded. It returns a plausible top-20 next-token distribution
-// so the scoring pipeline — greedy matching, KL, calibration, percentiles —
+// so the scoring pipeline — greedy matching, surprisal, calibration, percentiles —
 // runs end-to-end and the site is fully playable.
 //
 // It is NOT a language model. It qualitatively mimics one: common English

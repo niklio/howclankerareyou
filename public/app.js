@@ -142,7 +142,7 @@ function renderResults(fin, live) {
     <div class="model-row">
       <div class="head">
         <span>${esc(m.label)} <span class="fine">(${esc(m.maker)})</span></span>
-        <span class="kl">${m.score}% · ${m.avgKL} nats/token</span>
+        <span class="kl">${m.score}% · ${m.avgKL} nats surprisal</span>
       </div>
       <div class="bar"><div style="width:${Math.max(1, m.score)}%"></div></div>
     </div>`
@@ -249,7 +249,7 @@ function flash(btn, msg) {
 }
 
 // Most / least clanker answer, derived from the server grid so it renders on
-// shared pages too. Lowest per-question divergence = most clanker.
+// shared pages too. Lowest per-question surprisal = most clanker.
 function renderDetails(grid) {
   const rows = (grid || []).filter((r) => typeof r.kl === 'number' && r.answer);
   if (rows.length < 2) return '';
@@ -257,9 +257,9 @@ function renderDetails(grid) {
   const most = sorted[0];
   const least = sorted[sorted.length - 1];
   return (
-    `<div class="detail"><p class="q">most clanker answer (${most.kl.toFixed(1)} nats/token)</p>` +
+    `<div class="detail"><p class="q">most clanker answer (${most.kl.toFixed(1)} nats surprisal)</p>` +
     `<p>${esc(most.prompt)} <span class="accent">${esc(most.answer)}</span></p></div>` +
-    `<div class="detail"><p class="q">least clanker answer (${least.kl.toFixed(1)} nats/token)</p>` +
+    `<div class="detail"><p class="q">least clanker answer (${least.kl.toFixed(1)} nats surprisal)</p>` +
     `<p>${esc(least.prompt)} <span class="good">${esc(least.answer)}</span></p></div>`
   );
 }

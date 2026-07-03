@@ -113,7 +113,7 @@ function render(d,email){
       '<div class="card"><h3>Clanker-score distribution</h3>'+bars(d.scoreHistogram.map(b=>({l:b.bucket+'%',v:b.count})),'l','v')+'</div>'+
       '<div class="card"><h3>Inner-clanker model (nearest)</h3>'+bars(d.modelShare,'label','count')+'</div>'+
       '<div class="card"><h3>Traffic sources</h3>'+(d.referrers.length?bars(d.referrers,'ref','count'):'<p class="muted">no referrer data yet</p>')+'</div>'+
-      '<div class="card"><h3>Most→least clanker question (avg nats/token)</h3>'+bars(d.questionClanker.map(q=>({l:q.prompt.slice(0,30),v:q.avgKl})),'l','v',v=>v.toFixed(1))+'</div>'+
+      '<div class="card"><h3>Most→least clanker question (avg surprisal, nats)</h3>'+bars(d.questionClanker.map(q=>({l:q.prompt.slice(0,30),v:q.avgKl})),'l','v',v=>v.toFixed(1))+'</div>'+
     '</div>'+
     '<p class="muted" style="margin-top:20px">updated '+new Date(d.updated).toLocaleString()+'</p>'+
     '</main>';
