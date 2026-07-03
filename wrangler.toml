@@ -70,3 +70,39 @@ ADMIN_EMAILS = "nliolios24@gmail.com"
 # Secrets (set with `wrangler secret put`):
 #   HF_TOKEN             — HuggingFace token; real inference via router.huggingface.co.
 #   GOOGLE_CLIENT_SECRET — OAuth client secret for the analytics dashboard login.
+#   TWITTERAPI_KEY       — twitterapi.io key for the "diagnose a Twitter account" feature.
+
+# --- Staging: separate worker + D1 at staging.howclankerareyou.com ----------
+# Deploy with `wrangler deploy --env staging`. Named envs don't inherit
+# bindings/vars/routes, so they're redefined here. main/assets/compat inherit.
+# Prod is never touched by a staging deploy.
+[env.staging.vars]
+MOCK_INFERENCE = "0"
+DAILY_CALL_CAP = "3000"          # low ceiling — bounds test spend on the shared HF credit
+
+[[env.staging.routes]]
+pattern = "staging.howclankerareyou.com"
+custom_domain = true
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "howclankerareyou-staging"
+database_id = "4aefcc3d-3996-44fd-a7d5-163013598702"
+
+[[env.staging.unsafe.bindings]]
+name = "SCORE_RL"
+type = "ratelimit"
+namespace_id = "2001"
+simple = { limit = 40, period = 60 }
+
+[[env.staging.unsafe.bindings]]
+name = "SESSION_RL"
+type = "ratelimit"
+namespace_id = "2002"
+simple = { limit = 20, period = 60 }
+
+[[env.staging.unsafe.bindings]]
+name = "DIAGNOSE_RL"
+type = "ratelimit"
+namespace_id = "2003"
+simple = { limit = 6, period = 60 }   # per-IP Twitter diagnoses / minute (costly)
