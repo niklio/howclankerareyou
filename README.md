@@ -101,6 +101,11 @@ browser ── howclankerareyou.com ── Cloudflare Worker ─┬─ static SP
 - **Resilience:** when a Cloudflare Durable-Objects incident degraded the
   database's region, the D1 was migrated to a healthy region with a one-line
   config change (the app rebinds by name, no code change).
+- **Analytics:** a private dashboard at `analytics.howclankerareyou.com`
+  (host-routed in the same Worker, Google-OAuth gated to one email, D1 sessions)
+  charts the funnel, virality loop, score distribution, and HF spend — all from
+  the product tables plus a lightweight fire-and-forget events beacon. Charts are
+  hand-rolled inline SVG; no build step, no chart library.
 
 ## Project layout
 

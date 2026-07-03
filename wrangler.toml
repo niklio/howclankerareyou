@@ -8,6 +8,9 @@ workers_dev = true
 directory = "./public"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
+# Worker runs first on every request so it can log traffic events and
+# host-route the analytics subdomain; it then serves assets via env.ASSETS.
+run_worker_first = true
 
 # Sessions, per-question scores, final results (for percentiles + share links).
 # Moved off ENAM (e0960c17-…) to WNAM on 2026-07-03 to dodge a Cloudflare
@@ -27,6 +30,11 @@ custom_domain = true
 
 [[routes]]
 pattern = "howclankerareyou.nikliolios.com"
+custom_domain = true
+
+# Admin analytics dashboard (Google-OAuth gated to ADMIN_EMAILS).
+[[routes]]
+pattern = "analytics.howclankerareyou.com"
 custom_domain = true
 
 # Abuse guards. Per-IP rate limits cap velocity; each /api/score fans out
@@ -54,5 +62,11 @@ MOCK_INFERENCE = "0"
 # spending limit. ~25k ≈ ~1k full plays/day.
 DAILY_CALL_CAP = "25000"
 
+# Analytics dashboard access. GOOGLE_CLIENT_ID is public; ADMIN_EMAILS is the
+# comma-separated allowlist that can view analytics.howclankerareyou.com.
+GOOGLE_CLIENT_ID = "414111145118-hc7g5q15rso6jclr1isp1hrv5u23lj3d.apps.googleusercontent.com"
+ADMIN_EMAILS = "nliolios24@gmail.com"
+
 # Secrets (set with `wrangler secret put`):
-#   HF_TOKEN — HuggingFace token; real inference via router.huggingface.co.
+#   HF_TOKEN             — HuggingFace token; real inference via router.huggingface.co.
+#   GOOGLE_CLIENT_SECRET — OAuth client secret for the analytics dashboard login.

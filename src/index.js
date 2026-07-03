@@ -1,12 +1,31 @@
 import { QUESTIONS } from './questions.js';
 import { MODELS, scoreModel, clankerScore, isMock, heatLevel } from './scoring.js';
+import * as auth from './auth.js';
+import { gatherAnalytics } from './analytics.js';
+import { DASHBOARD_HTML } from './dashboard.js';
+
+const ANALYTICS_HOST = 'analytics.howclankerareyou.com';
+const ANALYTICS_URL = 'https://analytics.howclankerareyou.com/';
+const CANONICAL = 'https://howclankerareyou.com';
+const COOKIE_DOMAIN = '.howclankerareyou.com';
+const SESSION_COOKIE = 'hcay_session';
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    // Route on the Host header, not url.hostname — wrangler dev rewrites the
+    // URL to localhost, but the header carries the real host in both envs.
+    const host = (request.headers.get('host') || url.hostname).split(':')[0];
+
+    // OAuth endpoints work on any host but pin themselves to the canonical apex.
+    if (url.pathname.startsWith('/auth/')) return authRoutes(request, env, url, host);
+
+    // Admin analytics subdomain: email-gated API + dashboard shell.
+    if (host === ANALYTICS_HOST) return analyticsHost(request, env, url);
+
     if (url.pathname.startsWith('/api/')) {
       try {
-        return await api(request, env, url);
+        return await api(request, env, url, ctx);
       } catch (err) {
         return json({ error: err.message }, 500);
       }
@@ -19,22 +38,167 @@ export default {
       headers.set('content-type', 'application/xml; charset=utf-8');
       return new Response(res.body, { status: res.status, headers });
     }
+    // Fire-and-forget traffic instrumentation.
+    if (request.method === 'GET' && url.pathname === '/') logEvent(env, ctx, request, 'pageview');
+    else if (request.method === 'GET' && /^\/r\/[0-9a-fA-F-]{8,}$/.test(url.pathname))
+      logEvent(env, ctx, request, 'result_view');
     return env.ASSETS.fetch(request);
   },
 };
 
-async function api(request, env, url) {
+// --- admin auth (Google OAuth, pinned to the canonical apex) ---------------
+
+async function authRoutes(request, env, url, host) {
+  const next = url.searchParams.get('next') || ANALYTICS_URL;
+
+  if (url.pathname === '/auth/google') {
+    // Pin to the canonical apex so redirect_uri matches Google's registration.
+    if (host !== 'howclankerareyou.com') {
+      const u = new URL(CANONICAL + '/auth/google');
+      if (safeNext(next)) u.searchParams.set('next', next);
+      return Response.redirect(u.toString(), 302);
+    }
+    const state = crypto.randomUUID();
+    const headers = new Headers({
+      location: auth.googleAuthUrl(env, CANONICAL + '/auth/google/callback', state),
+    });
+    headers.append('set-cookie', auth.cookieHeader('oauth_state', state, { maxAge: 600 }));
+    if (safeNext(next))
+      headers.append('set-cookie', auth.cookieHeader('oauth_next', encodeURIComponent(next), { maxAge: 600 }));
+    return new Response(null, { status: 302, headers });
+  }
+
+  if (url.pathname === '/auth/google/callback') {
+    const code = url.searchParams.get('code');
+    const state = url.searchParams.get('state');
+    if (!code || !state || state !== auth.getCookie(request, 'oauth_state'))
+      return new Response('auth failed (bad state)', { status: 400 });
+    let email;
+    try {
+      ({ email } = await auth.exchangeCode(env, code, CANONICAL + '/auth/google/callback'));
+    } catch {
+      return new Response('auth failed', { status: 400 });
+    }
+    const sid = await auth.createSession(env, email);
+    const dest = decodeURIComponent(auth.getCookie(request, 'oauth_next') || '');
+    const headers = new Headers({ location: safeNext(dest) ? dest : ANALYTICS_URL });
+    headers.append(
+      'set-cookie',
+      auth.cookieHeader(SESSION_COOKIE, sid, { maxAge: 30 * 86400, domain: COOKIE_DOMAIN })
+    );
+    headers.append('set-cookie', auth.cookieHeader('oauth_state', '', { maxAge: 0 }));
+    headers.append('set-cookie', auth.cookieHeader('oauth_next', '', { maxAge: 0 }));
+    return new Response(null, { status: 302, headers });
+  }
+
+  if (url.pathname === '/auth/logout') {
+    await auth.destroySession(env, auth.getCookie(request, SESSION_COOKIE));
+    const headers = new Headers({ location: safeNext(next) ? next : CANONICAL });
+    // Clear both the domain-scoped and any host-only cookie.
+    headers.append('set-cookie', auth.cookieHeader(SESSION_COOKIE, '', { maxAge: 0, domain: COOKIE_DOMAIN }));
+    headers.append('set-cookie', auth.cookieHeader(SESSION_COOKIE, '', { maxAge: 0 }));
+    return new Response(null, { status: 302, headers });
+  }
+  return new Response('not found', { status: 404 });
+}
+
+async function analyticsHost(request, env, url) {
+  if (url.pathname.startsWith('/api/')) {
+    const email = await auth.sessionEmail(env, auth.getCookie(request, SESSION_COOKIE));
+    const admin = auth.isAdmin(env, email);
+    if (url.pathname === '/api/me') return json({ email: email || null, admin });
+    if (!admin) return json({ error: 'forbidden' }, 403);
+    if (url.pathname === '/api/analytics') return json(await gatherAnalytics(env));
+    return json({ error: 'not found' }, 404);
+  }
+  if (url.pathname === '/favicon.svg') return env.ASSETS.fetch(new Request(CANONICAL + '/favicon.svg'));
+  return new Response(DASHBOARD_HTML, {
+    headers: { 'content-type': 'text/html; charset=utf-8', 'x-robots-tag': 'noindex' },
+  });
+}
+
+function safeNext(n) {
+  try {
+    const u = new URL(n);
+    return u.protocol === 'https:' && (u.hostname === 'howclankerareyou.com' || u.hostname.endsWith(COOKIE_DOMAIN));
+  } catch {
+    return false;
+  }
+}
+
+// --- event logging (fire-and-forget) ---------------------------------------
+
+function logEvent(env, ctx, request, type, extra = {}) {
+  const p = (async () => {
+    try {
+      await env.DB.prepare(
+        'INSERT INTO events (id, ts, day, type, ref, visitor, session_id, meta) VALUES (?,?,?,?,?,?,?,?)'
+      )
+        .bind(
+          crypto.randomUUID(),
+          Date.now(),
+          new Date().toISOString().slice(0, 10),
+          type,
+          type === 'pageview' ? refHost(request) : null,
+          visitorHash(request),
+          extra.session || null,
+          extra.meta || null
+        )
+        .run();
+    } catch {}
+  })();
+  if (ctx && ctx.waitUntil) ctx.waitUntil(p);
+}
+
+function refHost(request) {
+  const r = request.headers.get('referer');
+  if (!r) return null;
+  try {
+    const h = new URL(r).hostname;
+    return h === 'howclankerareyou.com' || h.endsWith(COOKIE_DOMAIN) ? null : h;
+  } catch {
+    return null;
+  }
+}
+
+// Non-reversible bucket for unique-visitor counts (no raw IP stored).
+function visitorHash(request) {
+  const s =
+    (request.headers.get('cf-connecting-ip') || '') +
+    '|' +
+    (request.headers.get('user-agent') || '').slice(0, 40) +
+    '|hcay';
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16);
+}
+
+async function api(request, env, url, ctx) {
   const { pathname } = url;
 
   if (request.method === 'GET' && pathname === '/api/status') {
     return json({ mock: isMock(env) });
   }
 
+  // Client-side event beacon (share taps). Only 'share' is client-loggable;
+  // pageview/result_view are logged server-side to prevent inflation.
+  if (request.method === 'POST' && pathname === '/api/event') {
+    const body = await request.json().catch(() => ({}));
+    if (body.type === 'share') logEvent(env, ctx, request, 'share', { session: body.session });
+    return json({ ok: true });
+  }
+
   if (request.method === 'POST' && pathname === '/api/session') {
     if (env.SESSION_RL) {
       const ip = request.headers.get('cf-connecting-ip') || 'anon';
       const { success } = await env.SESSION_RL.limit({ key: ip });
-      if (!success) return json({ error: 'slow down — too many sessions' }, 429);
+      if (!success) {
+        logEvent(env, ctx, request, 'ratelimited', { meta: 'session' });
+        return json({ error: 'slow down — too many sessions' }, 429);
+      }
     }
     const id = crypto.randomUUID();
     await env.DB.prepare('INSERT INTO sessions (id, created_at) VALUES (?, ?)')
@@ -52,7 +216,10 @@ async function api(request, env, url) {
     if (env.SCORE_RL) {
       const ip = request.headers.get('cf-connecting-ip') || 'anon';
       const { success } = await env.SCORE_RL.limit({ key: ip });
-      if (!success) return json({ error: 'rate limited, slow down' }, 429);
+      if (!success) {
+        logEvent(env, ctx, request, 'ratelimited', { meta: 'score' });
+        return json({ error: 'rate limited, slow down' }, 429);
+      }
     }
     const body = await request.json();
     const question = QUESTIONS.find((q) => q.id === body.questionId);

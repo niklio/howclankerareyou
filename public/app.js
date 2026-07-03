@@ -207,6 +207,15 @@ function shareText(fin, grid, url) {
 
 async function shareResult(fin, grid, url) {
   const text = shareText(fin, grid, url);
+  // Fire-and-forget analytics beacon for the share tap.
+  try {
+    fetch('/api/event', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'share', session: fin.id }),
+      keepalive: true,
+    });
+  } catch {}
   // Prefer the native share sheet on touch devices (feature-detected, not UA
   // sniffed). The whole payload — headline + emoji grid + link — goes in `text`
   // so it survives every target; iMessage still auto-previews the URL below it.

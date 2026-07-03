@@ -33,3 +33,26 @@ CREATE TABLE IF NOT EXISTS usage (
   day TEXT PRIMARY KEY,
   calls INTEGER NOT NULL
 );
+
+-- Admin OAuth sessions for analytics.howclankerareyou.com.
+CREATE TABLE IF NOT EXISTS web_sessions (
+  id TEXT PRIMARY KEY,
+  email TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+
+-- Product analytics events (traffic, virality, funnel). Fire-and-forget writes.
+-- type: pageview | result_view | share | start | ratelimited
+CREATE TABLE IF NOT EXISTS events (
+  id TEXT PRIMARY KEY,
+  ts INTEGER NOT NULL,          -- ms epoch
+  day TEXT NOT NULL,            -- YYYY-MM-DD (UTC)
+  type TEXT NOT NULL,
+  ref TEXT,                     -- referrer host (pageview)
+  visitor TEXT,                 -- salted-hash of IP, for unique counts
+  session_id TEXT,
+  meta TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_events_type_day ON events(type, day);
+CREATE INDEX IF NOT EXISTS idx_events_day ON events(day);
