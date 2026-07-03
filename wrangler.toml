@@ -1,0 +1,35 @@
+name = "howclankerareyou"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+workers_dev = true
+
+# Static frontend; the Worker handles /api/*, assets serve everything else.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+# Sessions, per-question scores, final results (for percentiles + share links).
+[[d1_databases]]
+binding = "DB"
+database_name = "howclankerareyou"
+database_id = "e0960c17-f7d6-4ded-8f28-4af3dd82a4a0"
+
+[[routes]]
+pattern = "howclankerareyou.nikliolios.com"
+custom_domain = true
+
+# Cost guard: /api/score fans out ~11 upstream model calls per request.
+[[unsafe.bindings]]
+name = "SCORE_RL"
+type = "ratelimit"
+namespace_id = "1001"
+simple = { limit = 60, period = 60 }
+
+[vars]
+# "1" routes scoring through the deterministic mock (src/mock.js) so the site
+# is live without spend. Set to "0" and add OPENROUTER_API_KEY to go real.
+MOCK_INFERENCE = "1"
+
+# Secrets (set with `wrangler secret put`):
+#   OPENROUTER_API_KEY — OpenRouter key; only consulted when MOCK_INFERENCE=0.

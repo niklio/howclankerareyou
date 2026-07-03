@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>how clanker are you?</title>
+  <meta name="description" content="Finish eight sentences. We measure the KL divergence between you and four language models. Find out how much clanker is in you.">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main id="app">
+    <section id="view-landing" hidden>
+      <h1 class="title">how clanker<br>are you?</h1>
+      <p class="sub">a KL-divergence Turing test, reversed.</p>
+      <p>Language models predict the next token. You, allegedly, do something
+      more interesting. Finish eight sentences — for every word you type, we
+      ask four LLMs (GPT-4o mini, Llama, DeepSeek, Mistral) how likely they were
+      to say the same thing, and measure the divergence between you and the
+      machines.</p>
+      <p class="demo" id="demo-note" hidden>⚠ demo mode: inference isn't funded yet,
+      so scores come from a deterministic stand-in, not the real models. The math,
+      flow, and rankings are live — the logprobs are simulated.</p>
+      <p><span class="accent">low divergence</span> = you write like a model.
+      <span class="good">high divergence</span> = congratulations, human.</p>
+      <button id="btn-start" class="big">begin diagnostic</button>
+      <p class="fine">anonymous. answers are stored only to compute percentiles. takes ~2 minutes.</p>
+    </section>
+
+    <section id="view-quiz" hidden>
+      <p class="progress" id="quiz-progress"></p>
+      <p class="prompt"><span id="quiz-prompt"></span>&nbsp;<span class="cursor">▌</span></p>
+      <input id="quiz-input" type="text" maxlength="80" autocomplete="off"
+             autocapitalize="off" spellcheck="false" placeholder="finish the sentence…">
+      <p class="fine">3–10 words. be yourself. or don't.</p>
+      <p class="err" id="quiz-err" hidden></p>
+      <button id="btn-next">next →</button>
+    </section>
+
+    <section id="view-scoring" hidden>
+      <h2>interrogating the models…</h2>
+      <p class="fine">token by token. they can't hide their logprobs.</p>
+      <div class="scorebar"><div id="scorebar-fill"></div></div>
+      <p class="progress" id="scoring-progress"></p>
+    </section>
+
+    <section id="view-results" hidden>
+      <p class="fine" id="res-context"></p>
+      <p class="verdict-num">you are <span class="accent" id="res-score"></span> clanker</p>
+      <p class="verdict" id="res-verdict"></p>
+      <p id="res-percentile"></p>
+      <div id="res-models"></div>
+      <div id="res-details"></div>
+      <div class="row">
+        <button id="btn-share" hidden>copy share link</button>
+        <button id="btn-again">run it again</button>
+      </div>
+      <p class="fine" id="res-method">method: for each word you typed, each model reported its top-20
+      next-token logprobs conditioned on your actual text so far. your words are one-hot
+      distributions, so per-token KL(you ‖ model) = −log p<sub>model</sub>(your token),
+      averaged over tokens and questions. words outside the top-20 are floored.
+      similarity is normalized against each model's self-completion baseline, and your
+      overall score is your nearest model's — divergence to an ensemble is a min.
+      <span id="method-demo" hidden>(demo mode: logprobs are currently simulated.)</span></p>
+    </section>
+  </main>
+  <footer>
+    <a href="https://nikliolios.com">nikliolios.com</a>
+  </footer>
+  <script src="/app.js"></script>
+</body>
+</html>
