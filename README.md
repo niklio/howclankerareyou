@@ -102,9 +102,9 @@ browser ── howclankerareyou.com ── Cloudflare Worker ─┬─ static SP
 - **Abuse guards:** per-IP rate limits on session creation and scoring
   (Cloudflare rate-limit bindings), plus a D1-counted **global daily call cap**
   as a backstop against distributed abuse that per-IP limits miss.
-- **Cost:** a full 8-question run is ~99 model calls ≈ **$0.001** at current
-  provider rates — ~1,800 runs on the platform's included monthly credit, with
-  a hard spend ceiling (no pay-as-you-go attached).
+- **Cost:** a full 5-question run is ~60 model calls ≈ **$0.0006** at current
+  provider rates — a few thousand runs on the platform's included monthly
+  credit, with a spending limit as the dollar ceiling.
 - **Resilience:** when a Cloudflare Durable-Objects incident degraded the
   database's region, the D1 was migrated to a healthy region with a one-line
   config change (the app rebinds by name, no code change).

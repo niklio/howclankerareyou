@@ -272,7 +272,7 @@ async function api(request, env, url, ctx) {
         .all()
     ).results;
     const questionCount = new Set(rows.map((r) => r.question_id)).size;
-    if (questionCount < 4) return json({ error: 'not enough scored questions' }, 400);
+    if (questionCount < 3) return json({ error: 'not enough scored questions' }, 400);
 
     const perModel = MODELS.map((m) => {
       const mine = rows.filter((r) => r.model === m.id);
