@@ -149,53 +149,109 @@ function renderResults(fin, live) {
       )
       .join('');
 
-  $('res-details').innerHTML = live ? renderDetails() : '';
+  $('res-details').innerHTML = renderDetails(fin.grid);
 
-  const share = $('btn-share');
-  share.hidden = !live;
-  if (live) {
-    const url = `${location.origin}/r/${fin.id}`;
-    share.onclick = () => {
-      navigator.clipboard.writeText(url).then(() => (share.textContent = 'copied'));
-    };
+  // Heat grid + Wordle-style share.
+  const grid = fin.grid;
+  const url = fin.id ? `${location.origin}/r/${fin.id}` : location.origin;
+  if (grid && grid.length) {
+    $('res-grid').innerHTML = grid
+      .map(
+        (row) =>
+          `<div class="grid-row" title="${esc(row.prompt + ' ' + row.answer)}">` +
+          row.cells
+            .map((c) => `<span class="cell l${c == null ? 'x' : c}"></span>`)
+            .join('') +
+          `</div>`
+      )
+      .join('');
+    $('grid-legend').hidden = false;
   }
-  $('btn-again').textContent = live ? 'run it again' : 'take the test yourself';
-  $('btn-again').onclick = () => (location.href = '/');
+
+  // Two audiences, two CTAs. The person who just took the test gets share (the
+  // primary action) + copy-link, with "run it again" as a secondary. Someone
+  // who opened a shared link gets neither — just "take the test" as the CTA.
+  const share = $('btn-share');
+  const link = $('btn-link');
+  const take = $('btn-take');
+  const again = $('btn-again');
+  if (live) {
+    // Taker: share is the primary action; "take it again" is their retake,
+    // sitting at the very bottom after the deeper stats.
+    if (grid && grid.length) {
+      share.hidden = false;
+      share.onclick = () => shareResult(fin, grid, url);
+      link.hidden = false;
+      link.onclick = () =>
+        navigator.clipboard.writeText(url).then(() => flash(link, 'link copied'));
+    }
+    again.hidden = false;
+    again.classList.remove('big');
+    again.textContent = 'take it again';
+    again.onclick = () => (location.href = '/');
+  } else {
+    // Recipient of a shared link already has "take the test" up top — no
+    // bottom button (and "again" would be wrong; they haven't taken it).
+    take.hidden = false;
+    take.onclick = () => (location.href = '/');
+  }
 }
 
-function renderDetails() {
-  // Per-question mean divergence across models, from the live score responses.
-  const rows = [];
-  for (const q of state.questions) {
-    const rs = Object.values(state.results[q.id] || {}).filter((r) => r && r.ok);
-    if (!rs.length) continue;
-    const kl = rs.reduce((s, r) => s + r.avgKL, 0) / rs.length;
-    rows.push({ q, kl, completion: rs[0].perStep.map((s) => s.chunk).join(' ') });
+const EMOJI = ['🟥', '🟧', '🟨', '🟩']; // 0 clanker → 3 human
+const gridToEmoji = (grid) =>
+  grid.map((row) => row.cells.map((c) => (c == null ? '⬜' : EMOJI[c])).join('')).join('\n');
+
+function shareText(fin, grid, url) {
+  return `how clanker are you? — ${fin.overall}% clanker 🤖\n\n${gridToEmoji(grid)}\n\n${url}`;
+}
+
+async function shareResult(fin, grid, url) {
+  const text = shareText(fin, grid, url);
+  // Prefer the native share sheet on touch devices (feature-detected, not UA
+  // sniffed). The whole payload — headline + emoji grid + link — goes in `text`
+  // so it survives every target; iMessage still auto-previews the URL below it.
+  // navigator.share() must run in the click's transient activation, so nothing
+  // async happens before it.
+  const canShare =
+    typeof navigator.share === 'function' &&
+    (!navigator.canShare || navigator.canShare({ text }));
+  const touch = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+  if (canShare && touch) {
+    try {
+      await navigator.share({ text });
+      return;
+    } catch (err) {
+      if (err && err.name === 'AbortError') return; // user dismissed the sheet
+      // any other error: fall through to clipboard
+    }
   }
+  try {
+    await navigator.clipboard.writeText(text);
+    flash($('btn-share'), 'copied — paste anywhere ▶');
+  } catch {
+    flash($('btn-share'), 'copy failed');
+  }
+}
+
+function flash(btn, msg) {
+  const old = btn.textContent;
+  btn.textContent = msg;
+  setTimeout(() => (btn.textContent = old), 1800);
+}
+
+// Most / least clanker answer, derived from the server grid so it renders on
+// shared pages too. Lowest per-question divergence = most clanker.
+function renderDetails(grid) {
+  const rows = (grid || []).filter((r) => typeof r.kl === 'number' && r.answer);
   if (rows.length < 2) return '';
-  rows.sort((a, b) => a.kl - b.kl);
-  const bot = rows[0];
-  const top = rows[rows.length - 1];
-
-  // The single most predictable word anywhere in the run.
-  let best = null;
-  for (const q of state.questions)
-    for (const [mid, r] of Object.entries(state.results[q.id] || {}))
-      if (r && r.ok)
-        for (const s of r.perStep)
-          if (s.matched && (!best || s.logprob > best.logprob)) best = { ...s, mid };
-  const model = best && state.models.find((m) => m.id === best.mid);
-  const predictable = best
-    ? `<div class="detail"><p class="q">most predictable word</p><p>“${esc(best.chunk)}” — ` +
-      `${esc(model.label)} had it at ${Math.round(Math.exp(best.logprob) * 100)}%.</p></div>`
-    : '';
-
+  const sorted = [...rows].sort((a, b) => a.kl - b.kl);
+  const most = sorted[0];
+  const least = sorted[sorted.length - 1];
   return (
-    `<div class="detail"><p class="q">most robotic answer (${bot.kl.toFixed(1)} nats/token)</p>` +
-    `<p>${esc(bot.q.prompt)} <span class="accent">${esc(bot.completion)}</span></p></div>` +
-    `<div class="detail"><p class="q">most human answer (${top.kl.toFixed(1)} nats/token)</p>` +
-    `<p>${esc(top.q.prompt)} <span class="good">${esc(top.completion)}</span></p></div>` +
-    predictable
+    `<div class="detail"><p class="q">most clanker answer (${most.kl.toFixed(1)} nats/token)</p>` +
+    `<p>${esc(most.prompt)} <span class="accent">${esc(most.answer)}</span></p></div>` +
+    `<div class="detail"><p class="q">least clanker answer (${least.kl.toFixed(1)} nats/token)</p>` +
+    `<p>${esc(least.prompt)} <span class="good">${esc(least.answer)}</span></p></div>`
   );
 }
 

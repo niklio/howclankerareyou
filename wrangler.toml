@@ -10,26 +10,49 @@ binding = "ASSETS"
 not_found_handling = "single-page-application"
 
 # Sessions, per-question scores, final results (for percentiles + share links).
+# Moved off ENAM (e0960c17-…) to WNAM on 2026-07-03 to dodge a Cloudflare
+# Durable-Objects incident in ENAM; move back once that region is healthy.
 [[d1_databases]]
 binding = "DB"
-database_name = "howclankerareyou"
-database_id = "e0960c17-f7d6-4ded-8f28-4af3dd82a4a0"
+database_name = "howclankerareyou-wnam"
+database_id = "73ce6cc7-40a8-4c3f-8d33-b705f0474694"
+
+[[routes]]
+pattern = "howclankerareyou.com"
+custom_domain = true
+
+[[routes]]
+pattern = "www.howclankerareyou.com"
+custom_domain = true
 
 [[routes]]
 pattern = "howclankerareyou.nikliolios.com"
 custom_domain = true
 
-# Cost guard: /api/score fans out ~11 upstream model calls per request.
+# Abuse guards. Per-IP rate limits cap velocity; each /api/score fans out
+# several upstream model calls, so it's the expensive one.
 [[unsafe.bindings]]
 name = "SCORE_RL"
 type = "ratelimit"
 namespace_id = "1001"
-simple = { limit = 60, period = 60 }
+simple = { limit = 40, period = 60 }   # per-IP scoring calls / minute
+
+[[unsafe.bindings]]
+name = "SESSION_RL"
+type = "ratelimit"
+namespace_id = "1002"
+simple = { limit = 20, period = 60 }   # per-IP new sessions / minute
 
 [vars]
-# "1" routes scoring through the deterministic mock (src/mock.js) so the site
-# is live without spend. Set to "0" and add OPENROUTER_API_KEY to go real.
-MOCK_INFERENCE = "1"
+# "1" forces the deterministic mock (src/mock.js). "0" uses real HF inference
+# via the HF_TOKEN secret. Live on real inference (HF PRO, $2/mo included credit).
+MOCK_INFERENCE = "0"
+
+# Global backstop: max scoring calls per UTC day across ALL users. Catches
+# distributed abuse that per-IP limits miss. Beyond this, /api/score returns
+# 429 until the next day. Tune freely — the real dollar cap is HF's own
+# spending limit. ~25k ≈ ~1k full plays/day.
+DAILY_CALL_CAP = "25000"
 
 # Secrets (set with `wrangler secret put`):
-#   OPENROUTER_API_KEY — OpenRouter key; only consulted when MOCK_INFERENCE=0.
+#   HF_TOKEN — HuggingFace token; real inference via router.huggingface.co.

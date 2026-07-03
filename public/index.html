@@ -3,27 +3,68 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>how clanker are you?</title>
-  <meta name="description" content="Finish eight sentences. We measure the KL divergence between you and four language models. Find out how much clanker is in you.">
+  <title>how clanker are you? — a reverse Turing test</title>
+  <meta name="description" content="Finish a few sentences. We measure the KL divergence between how you write and how AI models would, then score how much clanker is in you.">
+  <link rel="canonical" href="https://howclankerareyou.com/">
+  <meta name="theme-color" content="#f2efe6">
+
+  <!-- favicon -->
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="manifest" href="/site.webmanifest">
+
+  <!-- open graph / link previews -->
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="how clanker are you?">
+  <meta property="og:url" content="https://howclankerareyou.com/">
+  <meta property="og:title" content="how clanker are you?">
+  <meta property="og:description" content="A reverse Turing test: finish a few sentences and we measure the KL divergence between you and the machines. Find out how much clanker is in you.">
+  <meta property="og:image" content="https://howclankerareyou.com/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="how clanker are you? — a KL-divergence Turing test, reversed">
+
+  <!-- twitter -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="how clanker are you?">
+  <meta name="twitter:description" content="A reverse Turing test. Measure the KL divergence between you and the machines.">
+  <meta name="twitter:image" content="https://howclankerareyou.com/og.png">
+
+  <!-- structured data -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "WebApplication",
+    "name": "how clanker are you?",
+    "url": "https://howclankerareyou.com/",
+    "description": "A reverse Turing test that measures the KL divergence between how you write and how language models would.",
+    "applicationCategory": "GameApplication",
+    "operatingSystem": "Any",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+  }
+  </script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=Azeret+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <main id="app">
     <section id="view-landing" hidden>
       <h1 class="title">how clanker<br>are you?</h1>
-      <p class="sub">a KL-divergence Turing test, reversed.</p>
+      <p class="sub">// a KL-divergence Turing test, reversed.</p>
       <p>Language models predict the next token. You, allegedly, do something
-      more interesting. Finish eight sentences — for every word you type, we
-      ask four LLMs (GPT-4o mini, Llama, DeepSeek, Mistral) how likely they were
-      to say the same thing, and measure the divergence between you and the
-      machines.</p>
-      <p class="demo" id="demo-note" hidden>⚠ demo mode: inference isn't funded yet,
-      so scores come from a deterministic stand-in, not the real models. The math,
-      flow, and rankings are live — the logprobs are simulated.</p>
+      more interesting. Finish eight sentences; we measure the divergence
+      between you and the machines.</p>
       <p><span class="accent">low divergence</span> = you write like a model.
       <span class="good">high divergence</span> = congratulations, human.</p>
-      <button id="btn-start" class="big">begin diagnostic</button>
-      <p class="fine">anonymous. answers are stored only to compute percentiles. takes ~2 minutes.</p>
+      <button id="btn-start" class="big">begin diagnostic ▶</button>
+      <p class="demo" id="demo-note" hidden>⚠ demo mode: inference isn't funded
+      yet — scores come from a deterministic stand-in, not the real models.</p>
+      <p class="fine">anonymous · scored only for percentiles · ~2 min</p>
     </section>
 
     <section id="view-quiz" hidden>
@@ -48,11 +89,18 @@
       <p class="verdict-num">you are <span class="accent" id="res-score"></span> clanker</p>
       <p class="verdict" id="res-verdict"></p>
       <p id="res-percentile"></p>
+      <div id="res-grid"></div>
+      <p class="fine" id="grid-legend" hidden>one square per word · <span class="good">green</span> = human · <span class="accent">red</span> = clanker</p>
+      <div class="row">
+        <button id="btn-share" class="big" hidden>share result ▶</button>
+        <button id="btn-link" hidden>copy link</button>
+        <button id="btn-take" class="big" hidden>take the test ▶</button>
+      </div>
+      <h2 class="section">deeper stats</h2>
       <div id="res-models"></div>
       <div id="res-details"></div>
       <div class="row">
-        <button id="btn-share" hidden>copy share link</button>
-        <button id="btn-again">run it again</button>
+        <button id="btn-again" hidden>run it again</button>
       </div>
       <p class="fine" id="res-method">method: for each word you typed, each model reported its top-20
       next-token logprobs conditioned on your actual text so far. your words are one-hot
@@ -63,9 +111,6 @@
       <span id="method-demo" hidden>(demo mode: logprobs are currently simulated.)</span></p>
     </section>
   </main>
-  <footer>
-    <a href="https://nikliolios.com">nikliolios.com</a>
-  </footer>
   <script src="/app.js"></script>
 </body>
 </html>

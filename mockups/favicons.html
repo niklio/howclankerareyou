@@ -1,0 +1,106 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>favicon options</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=Azeret+Mono:wght@600&display=swap" rel="stylesheet">
+<style>
+  :root{--ink:#14110f;--paper:#f2efe6;--mag:#ff1e79;--cyan:#00a6c4;}
+  *{box-sizing:border-box}
+  body{margin:0;background:#e4e0d5;color:var(--ink);font-family:"Azeret Mono",monospace;padding:28px}
+  h1{font-family:Orbitron,sans-serif;font-size:20px;text-transform:uppercase;letter-spacing:.04em;margin:0 0 22px}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:22px;max-width:1080px}
+  .card{background:#efece2;border:1px solid #cfc9ba;padding:18px}
+  .num{font-size:12px;color:#6f6a5f;letter-spacing:.15em;text-transform:uppercase}
+  .name{font-family:Orbitron,sans-serif;font-size:13px;margin:2px 0 14px}
+  .big{display:block}
+  .sizes{display:flex;align-items:center;gap:14px;margin-top:16px;padding-top:14px;border-top:1px dashed #cfc9ba}
+  .chip{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px}
+  .light{background:#dcdcdc}
+  .dark{background:#202024}
+  .cap{font-size:10px;color:#8a857a}
+  svg{display:block}
+</style></head><body>
+<h1>how clanker are you? — favicon options</h1>
+<div class="grid" id="grid"></div>
+<script>
+// Each icon is a 100x100 SVG built to read at 16px. Backgrounds baked in so it
+// pops in a browser tab. Palette: ink #14110f, paper #f2efe6, magenta, cyan.
+const I = {};
+
+// 1 — GLITCH C : chromatic-aberration "C" for clanker, on an ink chip
+I.glitchC = `
+<rect width="100" height="100" rx="22" fill="#14110f"/>
+<g font-family="Orbitron, sans-serif" font-weight="900" font-size="70" text-anchor="middle">
+  <text x="47" y="72" fill="#00a6c4">C</text>
+  <text x="53" y="72" fill="#ff1e79">C</text>
+  <text x="50" y="72" fill="#f2efe6">C</text>
+</g>`;
+
+// 2 — CLANKER HEAD : minimal robot head, gradient visor, antenna
+I.head = `
+<rect width="100" height="100" rx="22" fill="#f2efe6"/>
+<line x1="50" y1="14" x2="50" y2="26" stroke="#14110f" stroke-width="4"/>
+<circle cx="50" cy="12" r="5" fill="#ff1e79"/>
+<rect x="24" y="26" width="52" height="46" rx="11" fill="#14110f"/>
+<rect x="18" y="42" width="8" height="16" rx="3" fill="#14110f"/>
+<rect x="74" y="42" width="8" height="16" rx="3" fill="#14110f"/>
+<rect x="32" y="40" width="36" height="18" rx="6" fill="#0a0a0c"/>
+<circle cx="42" cy="49" r="5" fill="#00a6c4"/>
+<circle cx="58" cy="49" r="5" fill="#ff1e79"/>`;
+
+// 3 — DIVERGENCE : one path forks into a magenta and a cyan branch (KL split)
+I.diverge = `
+<rect width="100" height="100" rx="22" fill="#14110f"/>
+<path d="M20 50 H44" stroke="#f2efe6" stroke-width="9" stroke-linecap="round"/>
+<path d="M44 50 C62 50 66 26 82 22" stroke="#ff1e79" stroke-width="9" fill="none" stroke-linecap="round"/>
+<path d="M44 50 C62 50 66 74 82 78" stroke="#00a6c4" stroke-width="9" fill="none" stroke-linecap="round"/>
+<circle cx="44" cy="50" r="7" fill="#f2efe6"/>
+<circle cx="82" cy="22" r="6" fill="#ff1e79"/>
+<circle cx="82" cy="78" r="6" fill="#00a6c4"/>`;
+
+// 4 — PROMPT : terminal chevron + blinking block cursor
+I.prompt = `
+<rect width="100" height="100" rx="22" fill="#14110f"/>
+<path d="M26 34 L48 50 L26 66" stroke="#00a6c4" stroke-width="9" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="56" y="40" width="20" height="26" rx="2" fill="#ff1e79"/>`;
+
+// 5 — LOGPROBS : next-token probability bars, picked token in magenta
+I.bars = `
+<rect width="100" height="100" rx="22" fill="#f2efe6"/>
+<rect x="20" y="30" width="13" height="46" rx="3" fill="#ff1e79"/>
+<rect x="37" y="44" width="13" height="32" rx="3" fill="#14110f"/>
+<rect x="54" y="52" width="13" height="24" rx="3" fill="#00a6c4"/>
+<rect x="71" y="60" width="13" height="16" rx="3" fill="#14110f"/>
+<rect x="16" y="78" width="72" height="4" rx="2" fill="#14110f"/>`;
+
+// 6 — SCANNER : HUD reticle with a magenta scan line
+I.scanner = `
+<rect width="100" height="100" rx="22" fill="#14110f"/>
+<circle cx="50" cy="50" r="26" fill="none" stroke="#00a6c4" stroke-width="6"/>
+<path d="M50 20 V34 M50 66 V80 M20 50 H34 M66 50 H80" stroke="#f2efe6" stroke-width="6" stroke-linecap="round"/>
+<line x1="26" y1="50" x2="74" y2="50" stroke="#ff1e79" stroke-width="4"/>
+<circle cx="50" cy="50" r="5" fill="#ff1e79"/>`;
+
+const META = [
+  ['glitchC','01','Glitch C'],
+  ['head','02','Clanker Head'],
+  ['diverge','03','Divergence Fork'],
+  ['prompt','04','Terminal Prompt'],
+  ['bars','05','Logprob Bars'],
+  ['scanner','06','HUD Scanner'],
+];
+const svg = (key,size) => `<svg width="${size}" height="${size}" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">${I[key]}</svg>`;
+document.getElementById('grid').innerHTML = META.map(([k,n,name]) => `
+  <div class="card">
+    <div class="num">${n}</div>
+    <div class="name">${name}</div>
+    <div class="big">${svg(k,104)}</div>
+    <div class="sizes">
+      <div class="chip light">${svg(k,32)}${svg(k,16)}</div>
+      <div class="chip dark">${svg(k,32)}${svg(k,16)}</div>
+      <span class="cap">32 / 16px</span>
+    </div>
+  </div>`).join('');
+</script>
+</body></html>

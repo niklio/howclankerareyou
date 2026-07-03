@@ -1,6 +1,6 @@
-// Per-token KL scoring against hosted models via OpenRouter. The user's
-// completion is a sequence of one-hot next-token samples; KL(user ‖ model) at
-// each position collapses to -log p_model(user's token).
+// Per-token KL scoring against hosted models via the HuggingFace Inference
+// Providers router. The user's completion is a sequence of one-hot next-token
+// samples; KL(user ‖ model) at each position collapses to -log p_model(token).
 //
 // We never tokenize the user's text ourselves. Instead we walk it greedily:
 // ask the model for its top-20 next tokens given (prompt + text consumed so
@@ -10,27 +10,28 @@
 // The assistant prefix always grows by the user's actual words, so every
 // step is conditioned on what the human really wrote.
 //
-// Until OpenRouter credits are funded, env.MOCK_INFERENCE routes topLogprobs
-// through a deterministic pseudo-distribution (./mock.js) so the full site is
-// live and playable. Flip MOCK_INFERENCE off + set OPENROUTER_API_KEY to go
-// real; d0 baselines should be re-measured against the real models then.
+// If env.HF_TOKEN is unset (or MOCK_INFERENCE=1), topLogprobs falls back to a
+// deterministic pseudo-distribution (./mock.js) so the site stays playable.
 import { mockTopLogprobs } from './mock.js';
 
-const ROUTER = 'https://openrouter.ai/api/v1/chat/completions';
+const ROUTER = 'https://router.huggingface.co/v1/chat/completions';
 
-// d0 = self-completion divergence baseline (nats/token): each model's own
-// sampled completions scored through this same pipeline. Scores are relative
-// to that baseline, so peakier models don't punish everyone equally. The
-// values below are provisional (mock era) — recalibrate once inference is live.
+// d0 = the "generic LLM" divergence anchor (nats/token): the level at which a
+// strong assistant's completion sits under this model. Text at or below d0
+// scores ~100% clanker. This is the panel model's self-completion baseline
+// (Llama 4.0 / DeepSeek 2.5 / Qwen 6.0) PLUS ~1.7 — because a foreign LLM's
+// text (GPT, Claude, …) is more surprising to a small open model than that
+// model's own output, so anchoring at self alone made any non-panel LLM score
+// only ~50%. Provider pins lock a backend that returns top-20 logprobs and
+// accepts an assistant-prefixed continuation.
 export const MODELS = [
-  { id: 'openai/gpt-4o-mini', label: 'GPT-4o mini', maker: 'OpenAI', d0: 0.9 },
-  { id: 'meta-llama/llama-3.1-8b-instruct', label: 'Llama 3.1 8B', maker: 'Meta', d0: 0.8 },
-  { id: 'deepseek/deepseek-chat', label: 'DeepSeek V3', maker: 'DeepSeek', d0: 0.7 },
-  { id: 'mistralai/mistral-nemo', label: 'Mistral Nemo', maker: 'Mistral', d0: 0.8 },
+  { id: 'meta-llama/Llama-3.1-8B-Instruct:nscale', label: 'Llama 3.1 8B', maker: 'Meta', d0: 5.7 },
+  { id: 'deepseek-ai/DeepSeek-V3-0324:novita', label: 'DeepSeek V3', maker: 'DeepSeek', d0: 4.2 },
+  { id: 'Qwen/Qwen3-235B-A22B-Instruct-2507:nscale', label: 'Qwen3 235B', maker: 'Alibaba', d0: 7.7 },
 ];
 
 export function isMock(env) {
-  return env.MOCK_INFERENCE === '1' || !env.OPENROUTER_API_KEY;
+  return env.MOCK_INFERENCE === '1' || !env.HF_TOKEN;
 }
 
 // Anchors every model on the same task; tuned so first-token mass lands on
@@ -42,9 +43,12 @@ const MAX_STEPS = 10;
 const FLOOR_MARGIN = 2; // unmatched token: min(top-20) - margin, in nats
 const FLOOR_MIN = -14;
 
-// Calibrated 2026-07-03: model-sampled text ≈ 100, generic AI-flavored
-// answers ≈ 70, quirky human answers ≈ 15.
-const LAMBDA = 3.0;
+// Re-anchored 2026-07-03 so any-LLM paste scores high: with the generic-LLM d0
+// above and overall = nearest-model similarity, frontier-LLM completions land
+// ~90–100% and quirky human answers ~20% (human sits ~2.2 nats past the anchor
+// → exp(−2.2/1.4) ≈ 0.21). Steeper than before to force that separation, so
+// clichéd human prose (which reads like an LLM) lands mid-range by design.
+const LAMBDA = 1.4;
 
 export function clankerScore(avgKL, d0) {
   return Math.round(1000 * Math.exp(-Math.max(0, avgKL - d0) / LAMBDA)) / 10;
@@ -54,6 +58,17 @@ export async function scoreModel(env, model, promptText, completion) {
   let consumed = promptText;
   let remaining = ' ' + completion.trim();
   const perStep = [];
+
+  // Word spans over the (space-prefixed) completion, so we can roll the
+  // per-token logprobs up into a per-word divergence for the share grid.
+  // Token boundaries differ per model, but words are the user's own, so
+  // per-word values align across models.
+  const source = ' ' + completion.trim();
+  const words = [];
+  for (const m of source.matchAll(/\S+/g)) {
+    words.push({ start: m.index, end: m.index + m[0].length, lps: [] });
+  }
+  let charPos = 0;
 
   for (let step = 0; step < MAX_STEPS && remaining.trim().length; step++) {
     const cands = await topLogprobs(env, model.id, promptText, consumed);
@@ -72,26 +87,41 @@ export async function scoreModel(env, model, promptText, completion) {
     }
     if (!chunk.length) break;
     perStep.push({ chunk: chunk.trim(), logprob: round(logprob), matched: !!match });
+    // Attribute this token's logprob to every word it overlaps.
+    const segEnd = charPos + chunk.length;
+    for (const w of words) if (w.start < segEnd && w.end > charPos) w.lps.push(logprob);
+    charPos = segEnd;
     consumed += chunk;
     remaining = remaining.slice(chunk.length);
   }
 
   if (!perStep.length) return null;
+  const perWord = words.map((w) =>
+    w.lps.length ? round(-w.lps.reduce((a, b) => a + b, 0) / w.lps.length) : null
+  );
   const avgKL = round(-perStep.reduce((s, t) => s + t.logprob, 0) / perStep.length);
-  return { avgKL, steps: perStep.length, perStep };
+  return { avgKL, steps: perStep.length, perStep, perWord };
 }
 
-async function topLogprobs(env, modelId, promptText, assistantText, retries = 1) {
+// Per-word divergence (nats) → heat level for the share grid.
+// 0 red = clanker (predictable), 3 green = human (surprising).
+export function heatLevel(kl) {
+  if (kl == null) return null;
+  if (kl < 2.0) return 0;
+  if (kl < 4.5) return 1;
+  if (kl < 7.5) return 2;
+  return 3;
+}
+
+async function topLogprobs(env, modelId, promptText, assistantText, retries = 3) {
   if (isMock(env)) return mockTopLogprobs(modelId, assistantText);
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const res = await fetch(ROUTER, {
         method: 'POST',
         headers: {
-          authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
+          authorization: `Bearer ${env.HF_TOKEN}`,
           'content-type': 'application/json',
-          'http-referer': 'https://howclankerareyou.nikliolios.com',
-          'x-title': 'how clanker are you',
         },
         body: JSON.stringify({
           model: modelId,

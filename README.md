@@ -1,71 +1,73 @@
 # how clanker are you?
 
 A KL-divergence Turing test, reversed — live at
-[howclankerareyou.nikliolios.com](https://howclankerareyou.nikliolios.com).
+**[howclankerareyou.com](https://howclankerareyou.com)**.
 
-You finish eight sentences. For every word you type, three open-weight LLMs
-(Llama 3.2 3B, Qwen 2.5 3B, Gemma 3 4B, served by Ollama on a Mac mini)
-report their top-20 next-token logprobs conditioned on your actual text so
-far. Your words are one-hot next-token distributions, so per-token
-KL(you ‖ model) collapses to −log p_model(your token). Averaged over tokens
-and questions, that's your divergence from each model.
+You finish eight sentences. For every word you type, three LLMs
+(Llama 3.1 8B, DeepSeek V3, Qwen3 235B) report their top-20 next-token
+logprobs conditioned on your actual text so far. Your words are one-hot
+next-token distributions, so per-token KL(you ‖ model) collapses to
+−log p_model(your token). Averaged over tokens and questions, that's your
+divergence from each model — and your **clanker score** is how close you got.
 
 ## How scoring works
 
-- No tokenizers client- or server-side. The Worker walks your completion
-  greedily: request top-20 next tokens for the current prefix, match the
+- **No tokenizers, client or server.** The Worker walks your completion
+  greedily: request the top-20 next tokens for the current prefix, match the
   longest candidate against your remaining text, record its logprob, append
-  **your** words to the prefix, repeat (`src/scoring.js`).
-- Tokens outside the top-20 are floored just below the 20th candidate.
-- Per-model similarity: `100 · exp(−max(0, D − d0) / 3)` where D is mean
-  nats/token and d0 is that model's measured self-completion baseline
-  (each model's own sampled answers scored through the same pipeline).
-- Overall score = nearest model's similarity (divergence to an ensemble is
-  a min). Calibration: model-sampled text ≈ 100, generic AI-flavored answers
-  ≈ 70, quirky human answers ≈ 15.
-- Scores land in D1; the percentile is your rank among all finished runs.
+  **your** words to the prefix, repeat (`src/scoring.js`). Tokens outside the
+  top-20 are floored just below the 20th candidate.
+- **Score mapping.** `100 · exp(−max(0, D − d0) / 1.4)`, where D is your mean
+  nats/token under a model and `d0` is that model's "generic-LLM" anchor (its
+  self-completion baseline + ~1.7, the level a *foreign* frontier LLM's text
+  sits at). Overall score = your nearest model's (divergence to an ensemble is
+  a min). Calibration: any-LLM paste ≈ 100%, quirky human answers ≈ 20%.
+- **Per-word heat grid.** The same per-token logprobs roll up into a per-word
+  divergence, colored green (human/surprising) → red (clanker/predictable),
+  and shared as a Wordle-style emoji grid.
 
-## Architecture
+## Stack
 
-```
-browser ── howclankerareyou.nikliolios.com (CF Worker + assets + D1)
-                │  /api/score: one call per (question, model)
-                ▼
-        clanker-inference.nikliolios.com (Cloudflare Tunnel)
-                │  WAF rule: requires x-clanker-key header
-                ▼
-        ollama on the Mac mini (llama3.2:3b, qwen2.5:3b, gemma3:4b)
-```
-
-Inference is free and ~200ms/token-step on the M4, so a full 3-model scoring
-round per question finishes in a few seconds, fired in the background while
-the user types the next answer.
+Cloudflare Worker (vanilla JS) + static assets + D1. No framework, no build.
+Inference via the HuggingFace Inference Providers router (HF PRO), with each
+model pinned to a backend that returns logprobs and accepts an assistant
+prefix. `src/mock.js` is a deterministic fallback used when `HF_TOKEN` is unset.
 
 ```
-src/index.js     API: /api/session, /api/score, /api/finish, /api/result/:id
-src/scoring.js   greedy top-k matching + KL + calibrated score mapping
-src/questions.js server-side question bank
-public/          landing → quiz → results SPA
+src/index.js      API: /api/session, /api/score, /api/finish, /api/result/:id, /api/status
+src/scoring.js    greedy top-k matching, KL, per-word heat, calibrated score mapping
+src/mock.js       deterministic stand-in for the logprobs endpoint
+src/questions.js  server-side question bank
+public/           landing → quiz → results SPA, favicon/OG/SEO assets
+schema.sql        D1 tables (sessions, answers, results, usage)
 ```
+
+## Abuse protection
+
+- Per-IP rate limits on `/api/session` (20/min) and `/api/score` (40/min) via
+  Cloudflare rate-limit bindings.
+- A global daily scoring-call cap (`DAILY_CALL_CAP`, D1-counted) as a backstop
+  against distributed abuse that per-IP limits miss.
+- Input bounds: fixed question/model lists, 80-char completion cap, ≤10 greedy
+  steps per answer.
+- The real dollar ceiling is HuggingFace's own spending limit — set one.
 
 ## Dev
 
 ```
-brew services start ollama
-ollama pull llama3.2:3b && ollama pull qwen2.5:3b && ollama pull gemma3:4b
-echo 'INFERENCE_URL=http://localhost:11434' > .dev.vars
-npx wrangler d1 execute howclankerareyou --local --file schema.sql
+echo 'MOCK_INFERENCE=0'          > .dev.vars   # or MOCK_INFERENCE=1 for the mock
+echo "HF_TOKEN=hf_…"            >> .dev.vars
+npx wrangler d1 execute howclankerareyou-wnam --local --file schema.sql
 npm run dev
 ```
 
 ## Deploy
 
 ```
-npx wrangler d1 create howclankerareyou   # once; paste id into wrangler.toml
-npx wrangler d1 execute howclankerareyou --remote --file schema.sql
-npx wrangler secret put INFERENCE_KEY     # must match the WAF rule value
+npx wrangler d1 execute howclankerareyou-wnam --remote --file schema.sql
+npx wrangler secret put HF_TOKEN
 npm run deploy
 ```
 
-The tunnel runs as a LaunchAgent (`com.nikliolios.clanker-tunnel`) created at
-setup time; ollama runs as a brew service. Both survive reboots.
+The D1 database lives in the WNAM region (moved off ENAM during a Cloudflare
+Durable-Objects incident); the previous ENAM id is noted in `wrangler.toml`.

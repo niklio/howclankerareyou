@@ -1,0 +1,14 @@
+{
+  "name": "how clanker are you?",
+  "short_name": "clanker",
+  "description": "A reverse Turing test: measure the KL divergence between you and the machines.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f2efe6",
+  "theme_color": "#f2efe6",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/favicon.svg", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
