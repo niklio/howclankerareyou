@@ -218,7 +218,7 @@ async function startSelfTest() {
   const old = link.textContent;
   link.textContent = 'booting…';
   try {
-    const d = await api('/api/session', {});
+    const d = await api('/api/session', { returning: localStorage.getItem('hcay_played') === '1' });
     Object.assign(state, { session: d.session, questions: d.questions, models: d.models, idx: 0, results: {}, promises: [], done: 0, total: 0 });
     if (d.mock) $('method-demo').hidden = false;
     show('quiz');
@@ -297,6 +297,8 @@ async function finishFlow() {
   try {
     const fin = await api('/api/finish', { session: state.session });
     if (gen !== navGen) return; // user navigated away mid-scoring
+    // Completed a run: future sessions draw random questions from the bank.
+    try { localStorage.setItem('hcay_played', '1'); } catch {}
     pushResult(fin, true);
   } catch (err) {
     if (gen !== navGen) return;

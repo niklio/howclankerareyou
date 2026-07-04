@@ -366,6 +366,7 @@ async function api(request, env, url, ctx) {
   }
 
   if (request.method === 'POST' && pathname === '/api/session') {
+    const sessBody = await request.json().catch(() => ({}));
     if (env.SESSION_RL) {
       const ip = request.headers.get('cf-connecting-ip') || 'anon';
       const { success } = await env.SESSION_RL.limit({ key: ip });
@@ -380,7 +381,10 @@ async function api(request, env, url, ctx) {
       .run();
     return json({
       session: id,
-      questions: pickQuestions(), // fresh random draw from the bank per session
+      // First play = the original five, in order (the canonical experience);
+      // repeat plays (client remembers completing a run) draw random from
+      // the bank so retakes stay fresh.
+      questions: sessBody.returning ? pickQuestions() : QUESTIONS.slice(0, 5),
       models: MODELS.map(({ id, label, maker }) => ({ id, label, maker })),
       mock: isMock(env),
     });
