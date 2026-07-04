@@ -7,5 +7,10 @@
   },
   "devDependencies": {
     "wrangler": "^4"
+  },
+  "dependencies": {
+    "@fontsource/azeret-mono": "^5.2.11",
+    "@fontsource/orbitron": "^5.2.8",
+    "workers-og": "^0.0.27"
   }
 }

@@ -11,6 +11,7 @@ import {
   heatLevelText,
 } from './scoring.js';
 import { parseHandle, getUser, searchSamples } from './twitter.js';
+import { ogImage } from './og.js';
 import * as auth from './auth.js';
 import { gatherAnalytics } from './analytics.js';
 import { DASHBOARD_HTML } from './dashboard.js';
@@ -67,6 +68,23 @@ export default {
       headers.set('content-type', 'application/xml; charset=utf-8');
       return new Response(res.body, { status: res.status, headers });
     }
+    // Dynamic OG card for a result: /og/<key>.png. Edge-cached per URL (the
+    // rewriter appends ?v=<score>, so a re-diagnosis mints a fresh URL).
+    // Unknown keys fall back to the static og.png.
+    const og = request.method === 'GET' && url.pathname.match(/^\/og\/([A-Za-z0-9_-]{1,64})\.png$/);
+    if (og) {
+      const cached = await caches.default.match(request);
+      if (cached) return cached;
+      const row = await resultByKey(env, og[1]);
+      if (!row) return env.ASSETS.fetch(new Request(CANONICAL + '/og.png'));
+      const img = await ogImage(row);
+      const out = new Response(await img.arrayBuffer(), {
+        headers: { 'content-type': 'image/png', 'cache-control': 'public, max-age=86400' },
+      });
+      if (ctx && ctx.waitUntil) ctx.waitUntil(caches.default.put(request, out.clone()));
+      return out;
+    }
+
     // Fire-and-forget traffic instrumentation.
     if (request.method === 'GET' && url.pathname === '/') logEvent(env, ctx, request, 'pageview');
     else if (['GET', 'HEAD'].includes(request.method) && /^\/r\/[A-Za-z0-9_-]{1,64}$/.test(url.pathname)) {
@@ -103,6 +121,9 @@ export default {
               .on('meta[name="twitter:description"]', set(desc))
               .on('meta[name="description"]', set(desc))
               .on('meta[property="og:url"]', set(`${CANONICAL}/r/${key}`))
+              .on('meta[property="og:image"]', set(`${CANONICAL}/og/${key}.png?v=${row.overall}`))
+              .on('meta[name="twitter:image"]', set(`${CANONICAL}/og/${key}.png?v=${row.overall}`))
+              .on('meta[property="og:image:alt"]', set(title))
               .transform(out);
           }
         } catch {} // preview sweetening must never break the page
