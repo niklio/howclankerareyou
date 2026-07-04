@@ -594,6 +594,13 @@ function esc(s) {
 
 // --- init ------------------------------------------------------------------
 
+// The full placeholder overflows narrow screens (same breakpoint where the
+// searchbar stacks); swap in the compact form there. The hero copy above the
+// input already spells out both platforms.
+if (window.matchMedia && window.matchMedia('(max-width: 560px)').matches) {
+  $('diag-input').placeholder = '@handle or u/name';
+}
+
 api('/api/status')
   .then((s) => {
     if (s.mock) {
