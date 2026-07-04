@@ -69,9 +69,9 @@ export default {
     }
     // Fire-and-forget traffic instrumentation.
     if (request.method === 'GET' && url.pathname === '/') logEvent(env, ctx, request, 'pageview');
-    else if (['GET', 'HEAD'].includes(request.method) && /^\/r\/[0-9a-fA-F-]{8,}$/.test(url.pathname)) {
-      // meta = the result id, so analytics can join views to results and
-      // split account-result opens from self-test opens.
+    else if (['GET', 'HEAD'].includes(request.method) && /^\/r\/[A-Za-z0-9_-]{1,64}$/.test(url.pathname)) {
+      // /r/<uuid> (self-tests, legacy links) or /r/<handle> (account share
+      // links). meta = the key, so analytics can join views to results.
       if (request.method === 'GET')
         logEvent(env, ctx, request, 'result_view', { meta: url.pathname.slice(3) });
       // Result pages can name a real person (diagnosed X accounts), so keep
@@ -646,11 +646,25 @@ async function api(request, env, url, ctx) {
   }
 
   if (request.method === 'GET' && pathname.startsWith('/api/result/')) {
-    const id = pathname.slice('/api/result/'.length);
-    const row = await env.DB.prepare('SELECT * FROM results WHERE id = ?').bind(id).first();
+    // The key is either a result UUID (self-tests, legacy account links) or an
+    // X handle (short share links: /r/jack → jack's LATEST diagnosis). The
+    // shapes can't collide: UUIDs are 36 chars with dashes, handles are ≤15
+    // chars of [A-Za-z0-9_].
+    const key = decodeURIComponent(pathname.slice('/api/result/'.length));
+    let row = null;
+    if (/^[0-9a-fA-F-]{16,}$/.test(key)) {
+      row = await env.DB.prepare('SELECT * FROM results WHERE id = ?').bind(key).first();
+    } else if (/^[A-Za-z0-9_]{1,15}$/.test(key)) {
+      row = await env.DB.prepare(
+        `SELECT * FROM results WHERE subject_type = 'account' AND lower(subject_handle) = ?
+         ORDER BY created_at DESC LIMIT 1`
+      )
+        .bind(key.toLowerCase())
+        .first();
+    }
     if (!row) return json({ error: 'not found' }, 404);
     const out = {
-      id,
+      id: row.id,
       overall: row.overall,
       perModel: JSON.parse(row.per_model),
       grid: row.grid ? JSON.parse(row.grid) : null,
