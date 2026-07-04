@@ -190,8 +190,14 @@ export async function gatherAnalytics(env, range = 'week') {
   // Diagnose outcome mix (all-time) + most-diagnosed handles. Lookup counts
   // come from events (includes cache hits); each handle's score is its latest
   // stored result (may be gone if opted out — shown without a score then).
+  // thin splits by its stored sub-cause (no-posts = handle miss/dormant,
+  // not-english, too-short, placeholder); rows predating the cause field —
+  // or whose backfill probe failed — show as 'thin · unclassified'.
   const outcomeRows = await q(
-    `SELECT ${dOut('outcome')} o, COUNT(*) n FROM events WHERE type='diagnose' GROUP BY o ORDER BY n DESC`
+    `SELECT (CASE WHEN ${dOut('outcome')}='thin'
+       THEN 'thin · ' || COALESCE(${dOut('cause')}, 'unclassified')
+       ELSE ${dOut('outcome')} END) o, COUNT(*) n
+     FROM events WHERE type='diagnose' GROUP BY o ORDER BY n DESC`
   );
   const topHandleRows = await q(
     `SELECT ${dOut('handle')} h, COUNT(*) n FROM events
