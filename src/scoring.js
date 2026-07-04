@@ -103,6 +103,46 @@ export async function scoreText(env, model, text, maxSteps = MAX_STEPS_TEXT) {
   return walk(env, model.id, TEXT_PRIME, text, { maxSteps, seed: '' });
 }
 
+// Fast free-form scorer: score the post's last `count` words CONCURRENTLY
+// instead of walking tokens sequentially. Each word's conditioning prefix
+// (everything before it) is known upfront, so there is no chain — one round
+// trip of `count` parallel calls replaces up to 18 serial ones. A word's
+// surprisal is the logprob of the best top-20 candidate that prefixes the
+// remaining text at that point (its first token), floored when outside the
+// top-20 — same matching and floor rules as the walk. Everything before the
+// window is warmup context (≥3 words via the sampling minimum), which buys
+// the old DROP_K cold-start correction for free: unissued calls cost nothing.
+export async function scoreWordWindow(env, model, text, count = 8) {
+  const words = String(text).trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return null;
+  const start = Math.max(0, words.length - count);
+
+  const perStep = await Promise.all(
+    words.slice(start).map(async (word, i) => {
+      const pos = start + i;
+      const prefix = words.slice(0, pos).join(' ');
+      const cands = await topLogprobs(env, model.id, TEXT_PRIME, prefix);
+      if (!cands) return null;
+      const remaining = ' ' + words.slice(pos).join(' ');
+      const match = bestMatch(cands, remaining, 1); // no first-letter forgiveness
+      let logprob;
+      if (match) {
+        logprob = match.logprob;
+      } else {
+        const minLp = Math.min(...cands.map((c) => c.logprob));
+        logprob = Math.max(FLOOR_MIN, minLp - FLOOR_MARGIN);
+      }
+      return { chunk: word, logprob: round(logprob), matched: !!match };
+    })
+  );
+
+  const kept = perStep.filter(Boolean);
+  if (!kept.length) return null;
+  const avgKL = round(-kept.reduce((s, t) => s + t.logprob, 0) / kept.length);
+  // perStep keeps positional nulls so grid cells stay word-aligned.
+  return { avgKL, steps: kept.length, perStep };
+}
+
 // Greedy top-20 token walk shared by both scorers. `userMsg` is the fixed user
 // turn; `text` is the human text whose surprisal we measure; `seed` is the
 // assistant prefix already "written" before the text (a stem for the self-test,

@@ -82,7 +82,7 @@ function diagnoseErrorText(err) {
     case 'protected':
       return err.message + ' — this account is private, so we can’t read it. try a public one.';
     case 'thin':
-      return err.message + ' — we need 5 recent original posts of ~18+ words. try someone wordier.';
+      return err.message + ' — we need 5 recent original posts of ~11+ words. try someone wordier.';
     case 'blocked':
       return 'this account asked to be removed from the tool.';
     case 'ratelimited':
@@ -111,7 +111,7 @@ function showGather(handle) {
   fill.style.width = '5%';
   show('gather');
   stopGather();
-  // A diagnosis is one long request (~60–120s: 15 token-walks upstream), so
+  // A diagnosis is one request (~2–5s: one search call + parallel scoring), so
   // the check-offs are optimistic timers and the bar creeps asymptotically
   // toward 92% until the response lands.
   let pct = 5;
@@ -119,17 +119,17 @@ function showGather(handle) {
     setTimeout(() => {
       scan[0].className = 'ok';
       scan[0].textContent = `✓ found @${handle}`;
-      fill.style.width = `${(pct = 12)}%`;
-    }, 1200),
+      fill.style.width = `${(pct = 25)}%`;
+    }, 700),
     setTimeout(() => {
       scan[1].className = 'ok';
       scan[1].textContent = '✓ pulled their 5 most recent posts (retweets & replies excluded)';
-      fill.style.width = `${(pct = 22)}%`;
-    }, 6000),
+      fill.style.width = `${(pct = 45)}%`;
+    }, 1700),
     setInterval(() => {
-      pct = Math.min(92, pct + (92 - pct) * 0.035);
+      pct = Math.min(92, pct + (92 - pct) * 0.12);
       fill.style.width = `${pct}%`;
-    }, 1000)
+    }, 300)
   );
 }
 function stopGather() {

@@ -109,53 +109,64 @@ function clean(text) {
 
 const wordCount = (s) => (s ? s.split(/\s+/).filter(Boolean).length : 0);
 
-// Pull recent original posts and clean them into scoreable samples. Excludes
-// retweets and non-English posts; `excludeReplies` also drops the account's
-// own replies (top-of-timeline standalone posts only). Paginates up to
-// `maxPages`, stopping once we have enough words or tweets. Returns:
-//   { samples: [{ id, text, words }], counts: { fetched, kept, words } }
-export async function getSamples(env, handle, opts = {}) {
-  const {
-    maxPages = 3,
-    targetWords = 110,
-    maxTweets = 14,
-    minWordsPerTweet = 4,
-    maxWordsPerTweet = 45, // cap a single long post's walk (bounds cost)
-    excludeReplies = false,
-  } = opts;
+// One-call sampling via advanced search: `from:handle -filter:retweets
+// -filter:replies lang:en` returns only the account's original English posts,
+// newest first, with author metadata on each tweet — no user/info call and no
+// timeline pagination in the common case (~1.4s). Paginates the search only
+// when the first page doesn't yield enough qualifying posts (sparse posters
+// like heavy retweeters). Returns:
+//   { user, samples: [{ id, text, words }], counts: { fetched, kept, words } }
+// user is null when the search returned no tweets at all — the caller falls
+// back to getUser to distinguish protected / nonexistent / empty accounts.
+export async function searchSamples(env, handle, opts = {}) {
+  const { maxTweets = 5, minWords = 11, maxWordsPerTweet = 45, maxPages = 4 } = opts;
+  const query = `from:${handle} -filter:retweets -filter:replies lang:en`;
 
   const samples = [];
+  let user = null;
   let fetched = 0;
   let words = 0;
   let cursor = '';
 
   for (let page = 0; page < maxPages; page++) {
-    if (page > 0) await sleep(1500); // stay under twitterapi.io's per-key QPS
-    const data = await api(env, '/twitter/user/last_tweets', { userName: handle, cursor });
-    const tweets = data.data?.tweets || data.tweets || [];
+    if (page > 0) await sleep(1200); // stay under twitterapi.io's per-key QPS
+    const data = await api(env, '/twitter/tweet/advanced_search', {
+      queryType: 'Latest',
+      query,
+      cursor,
+    });
+    const tweets = data.tweets || data.data?.tweets || [];
     fetched += tweets.length;
+    if (!user && tweets.length) {
+      const a = tweets[0].author || {};
+      user = {
+        id: a.id,
+        handle: a.userName || handle,
+        name: a.name || a.userName || handle,
+        followers: a.followers ?? 0,
+      };
+    }
 
     for (const t of tweets) {
       const raw = t.text || '';
-      if (raw.startsWith('RT @')) continue; // retweet — not their writing
-      if (excludeReplies && t.isReply) continue;
-      if (t.lang && t.lang !== 'en') continue; // English only (scorer is English)
+      if (raw.startsWith('RT @')) continue; // belt & braces; the query filters
+      if (t.isReply) continue;
       let text = clean(raw);
       const wc = wordCount(text);
-      if (wc < minWordsPerTweet) continue; // too short to score fairly
+      if (wc < minWords) continue; // too short to fill a grid row
       if (wc > maxWordsPerTweet) {
         text = text.split(/\s+/).slice(0, maxWordsPerTweet).join(' ');
       }
       const kept = wordCount(text);
       samples.push({ id: t.id, text, words: kept });
       words += kept;
-      if (samples.length >= maxTweets || words >= targetWords) break;
+      if (samples.length >= maxTweets) break;
     }
 
-    if (samples.length >= maxTweets || words >= targetWords) break;
+    if (samples.length >= maxTweets) break;
     if (!data.has_next_page || !data.next_cursor) break;
     cursor = data.next_cursor;
   }
 
-  return { samples, counts: { fetched, kept: samples.length, words } };
+  return { user, samples, counts: { fetched, kept: samples.length, words } };
 }

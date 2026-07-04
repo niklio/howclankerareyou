@@ -2,14 +2,14 @@ import { QUESTIONS } from './questions.js';
 import {
   MODELS,
   scoreModel,
-  scoreText,
+  scoreWordWindow,
   clankerScore,
   clankerScoreText,
   isMock,
   heatLevel,
   heatLevelText,
 } from './scoring.js';
-import { parseHandle, getUser, getSamples } from './twitter.js';
+import { parseHandle, getUser, searchSamples } from './twitter.js';
 import * as auth from './auth.js';
 import { gatherAnalytics } from './analytics.js';
 import { DASHBOARD_HTML } from './dashboard.js';
@@ -21,21 +21,18 @@ const COOKIE_DOMAIN = '.howclankerareyou.com';
 const SESSION_COOKIE = 'hcay_session';
 
 // --- diagnose tuning --------------------------------------------------------
-// Sample = the 5 most recent standalone posts (no retweets, no replies) long
-// enough to fill a full grid row. Each post is walked for exactly
-// DROP_K + GRID_COLS = 18 tokens: the first DROP_K are dropped (with no shared
-// stem, opening tokens are unpredictable for everyone and drown the AI↔human
-// signal) and the next GRID_COLS are scored — so a several-paragraph post
-// costs the same compute as a short one, and the share grid is always
+// Sample = the 5 most recent standalone posts (no retweets, no replies) with
+// ≥ MIN_POST_WORDS words. Each post is scored on its LAST GRID_COLS words —
+// everything before the window is warmup context (≥3 words), the old cold-
+// start drop for free — so a several-paragraph post costs the same compute as
+// an 11-word one, every post fills a full row, and the share grid is always
 // SAMPLE_TWEETS × GRID_COLS (5×8), emoji-shareable like the self-test.
-// Words are the sampling-time proxy for tokens — the greedy walk consumes at
-// most one word per step, so ≥ DROP_K + GRID_COLS words guarantees a full row
-// on every model. Thin accounts can't be graded fairly, so floor the sample.
+// The 11-word minimum (vs 18 before) keeps terse posters like @pmarca
+// gradeable without padding the grid.
 const SAMPLE_TWEETS = 5;
-const DROP_K = 10;
 const GRID_COLS = 8;
+const MIN_POST_WORDS = GRID_COLS + 3; // full window + ≥3 words of warmup
 const MIN_SAMPLE_TWEETS = 5;
-const MIN_SAMPLE_WORDS = 40;
 // Repeat lookups of the same handle reuse the stored result for a week —
 // popular accounts would otherwise re-burn scraper credits + inference on
 // every curious visitor. A week is fine: 5 recent posts don't move fast.
@@ -221,6 +218,22 @@ async function api(request, env, url, ctx) {
 
   if (request.method === 'GET' && pathname === '/api/status') {
     return json({ mock: isMock(env) });
+  }
+
+  // Internal scorer for the diagnose fan-out: one (post × model) pair per
+  // sub-invocation, so each pair's GRID_COLS parallel calls get their own
+  // Workers connection budget instead of queueing behind the parent's. Only
+  // reachable with the internal key (derived from HF_TOKEN; never leaves CF —
+  // requests arrive via the SELF service binding).
+  if (request.method === 'POST' && pathname === '/api/_score') {
+    if (!env.HF_TOKEN || request.headers.get('x-internal-key') !== internalKey(env)) {
+      return json({ error: 'not found' }, 404);
+    }
+    const body = await request.json().catch(() => ({}));
+    const model = MODELS.find((m) => m.id === body.model);
+    if (!model || typeof body.text !== 'string') return json({ error: 'bad request' }, 400);
+    const r = await scoreWordWindow(env, model, body.text, GRID_COLS);
+    return json({ r });
   }
 
   // TEMPORARY latency bench (staging only: BENCH var unset in prod → 404).
@@ -439,56 +452,57 @@ async function api(request, env, url, ctx) {
       return json({ error: 'the robots are resting — daily limit reached, try again tomorrow', code: 'cap' }, 429);
     }
 
-    // Resolve the account.
-    let user;
+    // One advanced-search call returns the account's original posts + author
+    // metadata together (no user/info round-trip, no timeline pagination in
+    // the common case). getUser runs only on the empty-result sad path to
+    // distinguish protected / nonexistent / just-quiet accounts.
+    let user, samples, counts;
     try {
-      user = await getUser(env, handle);
-    } catch (err) {
-      if (err.code === 'notfound')
-        return json({ error: `can't find @${handle} on X`, code: 'notfound' }, 404);
-      return json({ error: 'the post source is having a moment — try again in a sec', code: 'upstream' }, 502);
-    }
-    if (user.protected) {
-      return json({ error: `@${user.handle}'s posts are protected`, code: 'protected', handle: user.handle }, 422);
-    }
-
-    // Pull and clean recent posts.
-    let samples, counts;
-    try {
-      ({ samples, counts } = await getSamples(env, user.handle, {
+      ({ user, samples, counts } = await searchSamples(env, handle, {
         maxTweets: SAMPLE_TWEETS,
-        targetWords: Infinity, // exactly SAMPLE_TWEETS posts, not a word budget
-        excludeReplies: true,
-        minWordsPerTweet: DROP_K + GRID_COLS, // every post fills a full grid row
-        maxPages: 6, // reply-heavy / short-post timelines need a deeper scan
+        minWords: MIN_POST_WORDS,
       }));
     } catch (err) {
       return json({ error: 'the post source is having a moment — try again in a sec', code: 'upstream' }, 502);
     }
-    if (samples.length < MIN_SAMPLE_TWEETS || counts.words < MIN_SAMPLE_WORDS) {
+    if (!user) {
+      try {
+        const u = await getUser(env, handle);
+        if (u.protected)
+          return json({ error: `@${u.handle}'s posts are protected`, code: 'protected', handle: u.handle }, 422);
+        return json(
+          { error: `not enough public posts to grade @${u.handle} fairly`, code: 'thin', handle: u.handle, kept: 0 },
+          422
+        );
+      } catch (err) {
+        if (err.code === 'notfound')
+          return json({ error: `can't find @${handle} on X`, code: 'notfound' }, 404);
+        return json({ error: 'the post source is having a moment — try again in a sec', code: 'upstream' }, 502);
+      }
+    }
+    if (samples.length < MIN_SAMPLE_TWEETS) {
       return json(
         { error: `not enough public posts to grade @${user.handle} fairly`, code: 'thin', handle: user.handle, kept: samples.length },
         422
       );
     }
 
-    // Score every (post × model) walk with bounded concurrency. Each walk is
-    // capped at DROP_K + GRID_COLS steps — fixed compute per post.
+    // Score every (post × model) pair. Each pair is GRID_COLS parallel
+    // word-window calls with no sequential chain. When the SELF service
+    // binding exists, each pair runs in its own sub-invocation so its calls
+    // don't queue behind this invocation's 6-connection cap; otherwise score
+    // in-process (correct, just slower).
     const jobs = [];
     for (const t of samples) for (const m of MODELS) jobs.push({ t, m });
-    const scored = await pMap(
-      jobs,
-      async ({ t, m }) => ({ t, m, r: await scoreText(env, m, t.text, DROP_K + GRID_COLS) }),
-      8
+    const scored = await Promise.all(
+      jobs.map(async ({ t, m }) => ({ t, m, r: await scoreOne(env, m, t.text) }))
     );
 
-    // Reconcile the usage counter with the real number of model walks done
+    // Reconcile the usage counter with the real number of scoring calls made
     // (overDailyCap already charged 1 above).
-    ctx?.waitUntil?.(addUsage(env, jobs.length - 1));
+    ctx?.waitUntil?.(addUsage(env, jobs.length * GRID_COLS - 1));
 
-    // Aggregate per model: token-weighted mean surprisal over its posts, with
-    // the first DROP_K tokens of each post dropped (cold-start tokens are
-    // unpredictable for everyone and drown the AI↔human signal).
+    // Aggregate per model: mean word surprisal over each post's scored window.
     const byId = {}; // tweetId -> modelId -> result
     for (const { t, m, r } of scored) {
       if (!r) continue;
@@ -498,8 +512,7 @@ async function api(request, env, url, ctx) {
       let sumSurpr = 0, sumTok = 0, posts = 0;
       for (const t of samples) {
         const r = byId[t.id]?.[m.id];
-        if (!r || !r.perStep?.length) continue;
-        const kept = r.perStep.slice(DROP_K, DROP_K + GRID_COLS);
+        const kept = (r?.perStep || []).filter(Boolean);
         if (!kept.length) continue;
         sumSurpr += -kept.reduce((s, p) => s + p.logprob, 0);
         sumTok += kept.length;
@@ -643,10 +656,9 @@ function buildGrid(rows) {
 }
 
 // Build the account share grid: one row per sampled post, always GRID_COLS
-// cells wide (5×8 with the current tuning — clean emoji share). Cell j is the
-// heat of the models' (DROP_K + j)-th scored token, averaged by position:
-// token boundaries differ per model, but position j is the same depth into the
-// same post, and a fixed-width row beats word-alignment for shareability.
+// cells wide (5×8 with the current tuning — clean emoji share). Every model
+// scores the same last-GRID_COLS-words window, so cell j is the same word for
+// all models: its heat is the mean word surprisal across models.
 function buildDiagnoseGrid(samples, byId, handle) {
   const grid = [];
   for (const t of samples) {
@@ -654,7 +666,7 @@ function buildDiagnoseGrid(samples, byId, handle) {
     if (!perModel) continue;
     const cells = [];
     for (let j = 0; j < GRID_COLS; j++) {
-      const vals = MODELS.map((m) => perModel[m.id]?.perStep?.[DROP_K + j])
+      const vals = MODELS.map((m) => perModel[m.id]?.perStep?.[j])
         .filter(Boolean)
         .map((s) => -s.logprob);
       cells.push(vals.length ? heatLevelText(vals.reduce((a, b) => a + b, 0) / vals.length) : null);
@@ -662,7 +674,7 @@ function buildDiagnoseGrid(samples, byId, handle) {
     // Per-post surprisal over the scored window so the share page can rank
     // most- vs least-clanker posts (consistent with the headline aggregation).
     const kls = MODELS.map((m) => {
-      const kept = (perModel[m.id]?.perStep || []).slice(DROP_K, DROP_K + GRID_COLS);
+      const kept = (perModel[m.id]?.perStep || []).filter(Boolean);
       if (!kept.length) return null;
       return -kept.reduce((s, p) => s + p.logprob, 0) / kept.length;
     }).filter((v) => v != null);
@@ -672,21 +684,30 @@ function buildDiagnoseGrid(samples, byId, handle) {
   return grid;
 }
 
-// Run async `fn` over `items` with at most `concurrency` in flight. Keeps the
-// diagnose fan-out (posts × models, each a multi-call walk) from bursting the
-// upstream provider or the Worker subrequest budget.
-async function pMap(items, fn, concurrency = 8) {
-  const out = new Array(items.length);
-  let next = 0;
-  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (true) {
-      const i = next++;
-      if (i >= items.length) return;
-      out[i] = await fn(items[i], i);
-    }
-  });
-  await Promise.all(workers);
-  return out;
+// Score one (post × model) pair. Prefer dispatching to a sub-invocation via
+// the SELF service binding — each sub-invocation gets its own simultaneous-
+// connection budget, so all pairs' calls truly run concurrently (~1 round
+// trip total). Falls back to scoring in-process when the binding is absent
+// or the dispatch fails (correct, just slower).
+async function scoreOne(env, model, text) {
+  if (env.SELF) {
+    try {
+      const res = await env.SELF.fetch('https://internal/api/_score', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-internal-key': internalKey(env) },
+        body: JSON.stringify({ model: model.id, text }),
+      });
+      if (res.ok) return (await res.json()).r;
+    } catch {}
+  }
+  return scoreWordWindow(env, model, text, GRID_COLS);
+}
+
+// Shared secret for the internal fan-out route: derived from HF_TOKEN, which
+// both sides hold and outside callers don't. Travels only over the service
+// binding (never leaves Cloudflare).
+function internalKey(env) {
+  return 'ik_' + String(env.HF_TOKEN || '').slice(-24);
 }
 
 // Add `n` to today's global call counter, returning the new total (or null on
