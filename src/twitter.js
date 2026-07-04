@@ -136,6 +136,7 @@ export async function searchSamples(env, handle, opts = {}) {
   const query = `from:${handle} -filter:retweets -filter:replies lang:en`;
 
   const samples = [];
+  const raw = []; // every cleaned standalone post, any length (fallback material)
   let user = null;
   let fetched = 0;
   let words = 0;
@@ -163,11 +164,12 @@ export async function searchSamples(env, handle, opts = {}) {
     }
 
     for (const t of tweets) {
-      const raw = t.text || '';
-      if (raw.startsWith('RT @')) continue; // belt & braces; the query filters
+      const rawText = t.text || '';
+      if (rawText.startsWith('RT @')) continue; // belt & braces; the query filters
       if (t.isReply) continue;
-      let text = clean(raw);
+      let text = clean(rawText);
       const wc = wordCount(text);
+      if (wc >= 2) raw.push(text);
       if (wc < minWords) continue; // too short to fill a grid row
       if (wc > maxWordsPerTweet) {
         text = text.split(/\s+/).slice(0, maxWordsPerTweet).join(' ');
@@ -183,5 +185,5 @@ export async function searchSamples(env, handle, opts = {}) {
     cursor = data.next_cursor;
   }
 
-  return { user, samples, counts: { fetched, kept: samples.length, words, pages } };
+  return { user, samples, raw, counts: { fetched, kept: samples.length, words, pages } };
 }

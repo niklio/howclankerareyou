@@ -85,6 +85,7 @@ export async function redditSamples(env, name, opts = {}) {
   const author = (xml.match(/<name>\/u\/([A-Za-z0-9_-]+)<\/name>/) || [])[1] || name;
 
   const samples = [];
+  const raw = []; // every cleaned comment, any length (fallback material)
   let words = 0;
   for (const entry of entries) {
     const id = (entry.match(/<id>([^<]+)<\/id>/) || [])[1] || `c${samples.length}`;
@@ -92,6 +93,7 @@ export async function redditSamples(env, name, opts = {}) {
     if (!content) continue;
     let text = commentText(content);
     const wc = wordCount(text);
+    if (wc >= 2) raw.push(text);
     if (wc < minWords) continue;
     if (wc > maxWordsPerItem) text = text.split(/\s+/).slice(0, maxWordsPerItem).join(' ');
     const kept = wordCount(text);
@@ -103,6 +105,7 @@ export async function redditSamples(env, name, opts = {}) {
   return {
     user: { handle: author, name: `u/${author}`, platform: 'reddit' },
     samples,
+    raw,
     counts: { fetched: entries.length, kept: samples.length, words, pages: 1 },
   };
 }

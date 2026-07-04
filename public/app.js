@@ -330,11 +330,15 @@ function renderResults(fin, live) {
 
   const url = fin.id ? location.origin + resultPath(fin) : location.origin;
 
-  // Headline.
+  // Headline. A 10-wide grid marks the thin-account fallback (normal account
+  // grids are 8 wide) — detecting by shape means cached and shared results
+  // carry the note for free.
   const reddit = acct && fin.subject.platform === 'reddit';
   const whom = reddit ? `u/${handle}` : `@${handle}`;
+  const thinAcct = acct && fin.grid && fin.grid.length > 0 && fin.grid[0].cells.length === 10;
   if (acct) {
-    const cachedNote = fin.cached ? ' · graded earlier this week' : '';
+    const cachedNote = (fin.cached ? ' · graded earlier this week' : '') +
+      (thinAcct ? '<br><span class="fine">thin account — graded from everything public we could find, take it with extra salt.</span>' : '');
     const profile = reddit ? `https://www.reddit.com/user/${esc(handle)}` : `https://x.com/${esc(handle)}`;
     $('res-context').innerHTML =
       `graded from public ${reddit ? 'comments on reddit' : 'posts on X'} · <a href="${profile}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(whom)}</a>` +
@@ -405,7 +409,9 @@ function renderResults(fin, live) {
       )
       .join('');
     $('grid-legend').innerHTML = acct
-      ? 'one row per post, one square per scored word · <span class="good">green</span> = human · <span class="accent">red</span> = clanker'
+      ? (thinAcct
+          ? 'one square per scored word, everything strung together · <span class="good">green</span> = human · <span class="accent">red</span> = clanker'
+          : 'one row per post, one square per scored word · <span class="good">green</span> = human · <span class="accent">red</span> = clanker')
       : 'one square per word · <span class="good">green</span> = human · <span class="accent">red</span> = clanker';
     $('grid-legend').hidden = false;
   } else {

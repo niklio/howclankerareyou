@@ -36,6 +36,13 @@ const SAMPLE_TWEETS = 5;
 const GRID_COLS = 8;
 const MIN_POST_WORDS = GRID_COLS + 3; // full window + ≥3 words of warmup
 const MIN_SAMPLE_TWEETS = 5;
+// Thin-account fallback: when fewer than MIN_SAMPLE_TWEETS items qualify,
+// concatenate EVERYTHING pulled (newest first), warm up on the first
+// F_WARMUP words, score up to the next F_ROWS × F_COLS, and reshape the grid
+// into 10-wide rows. Reject only when nothing exists past the warmup.
+const F_WARMUP = 10;
+const F_COLS = 10;
+const F_ROWS = 5;
 // Repeat lookups of the same handle reuse the stored result for a week —
 // popular accounts would otherwise re-burn scraper credits + inference on
 // every curious visitor. A week is fine: 5 recent posts don't move fast.
@@ -557,9 +564,9 @@ async function api(request, env, url, ctx) {
     // comments). getUser runs only on X's empty-result sad path to distinguish
     // protected / nonexistent / just-quiet accounts.
     const who = (h) => (platform === 'reddit' ? `u/${h}` : `@${h}`);
-    let user, samples, counts;
+    let user, samples, counts, raw;
     try {
-      ({ user, samples, counts } =
+      ({ user, samples, counts, raw } =
         platform === 'reddit'
           ? await redditSamples(env, handle, { maxItems: SAMPLE_TWEETS, minWords: MIN_POST_WORDS })
           : await searchSamples(env, handle, { maxTweets: SAMPLE_TWEETS, minWords: MIN_POST_WORDS }));
@@ -588,12 +595,103 @@ async function api(request, env, url, ctx) {
       }
     }
     if (samples.length < MIN_SAMPLE_TWEETS) {
-      const cause = await thinCause(env, user.handle, counts, platform);
-      return diag(
-        json({ error: `not enough public ${platform === 'reddit' ? 'comments' : 'posts'} to grade ${who(user.handle)} fairly`, code: 'thin', handle: user.handle, kept: samples.length }, 422),
-        'thin',
-        { handle: user.handle, pages: counts.pages, cause }
+      // Not enough full items for the 5×8 grid — fall back to grading the
+      // concatenation of everything pulled. Only accounts with nothing past
+      // the warmup get rejected.
+      const allWords = (raw || []).join(' ').split(/\s+/).filter(Boolean);
+      if (allWords.length <= F_WARMUP + 1) {
+        const cause = await thinCause(env, user.handle, counts, platform);
+        return diag(
+          json({ error: `not enough public ${platform === 'reddit' ? 'comments' : 'posts'} to grade ${who(user.handle)} fairly`, code: 'thin', handle: user.handle, kept: samples.length }, 422),
+          'thin',
+          { handle: user.handle, pages: counts.pages, cause }
+        );
+      }
+      const windowN = Math.min(F_ROWS * F_COLS, allWords.length - F_WARMUP);
+      const text = allWords.slice(0, F_WARMUP + windowN).join(' ');
+      const tFetchF = Date.now() - t0;
+      const scoredF = await Promise.all(
+        TEXT_MODELS.map(async (m, i) => {
+          if (i) await new Promise((r) => setTimeout(r, i * 150));
+          return { m, r: await scorePostEcho(env, m, text, windowN) };
+        })
       );
+      const tScoreF = Date.now() - t0 - tFetchF;
+      ctx?.waitUntil?.(addUsage(env, TEXT_MODELS.length - 1));
+
+      const okF = scoredF.filter((x) => x.r);
+      if (!okF.length) {
+        return diag(json({ error: 'scoring failed — try again in a sec', code: 'upstream' }, 502), 'upstream', {
+          handle: user.handle, msFetch: tFetchF, msScore: tScoreF, pages: counts.pages,
+        });
+      }
+      const perModel = okF.map(({ m, r }) => ({
+        model: m.id,
+        label: m.label,
+        maker: m.maker,
+        avgKL: Math.round(r.avgKL * 1000) / 1000,
+        score: clankerScoreText(r.avgKL, m.d0text),
+        posts: raw.length,
+      }));
+      const overall = Math.max(...perModel.map((m) => m.score));
+
+      // Grid: 10-wide rows over the scored words, per-cell mean across models
+      // (all models scored the same window of the same text → word-aligned).
+      const steps = okF.map((x) => x.r.perStep);
+      const scoredWords = allWords.slice(F_WARMUP, F_WARMUP + windowN);
+      const grid = [];
+      for (let start = 0; start < windowN; start += F_COLS) {
+        const cells = [];
+        const rowVals = [];
+        for (let j = 0; j < F_COLS; j++) {
+          const pos = start + j;
+          if (pos >= windowN) { cells.push(null); continue; }
+          const vals = steps.map((ps) => ps[pos]).filter(Boolean).map((s) => -s.logprob);
+          if (vals.length) rowVals.push(...vals);
+          cells.push(vals.length ? heatLevelText(vals.reduce((a, b) => a + b, 0) / vals.length) : null);
+        }
+        grid.push({
+          prompt: who(user.handle),
+          answer: scoredWords.slice(start, Math.min(start + F_COLS, windowN)).join(' '),
+          cells,
+          kl: rowVals.length ? Math.round((rowVals.reduce((a, b) => a + b, 0) / rowVals.length) * 100) / 100 : null,
+        });
+      }
+      const sources = raw.slice(0, 10).map((t, i) => ({ id: `f${i}`, text: t }));
+
+      const id = crypto.randomUUID();
+      ctx?.waitUntil?.(
+        env.DB.prepare(
+          `INSERT INTO results (id, created_at, overall, per_model, grid, subject_type, subject_handle, subject_name, sources, subject_platform)
+           VALUES (?, ?, ?, ?, ?, 'account', ?, ?, ?, ?)`
+        )
+          .bind(id, Date.now(), overall, JSON.stringify(perModel), JSON.stringify(grid), user.handle, user.name || who(user.handle), JSON.stringify(sources), platform)
+          .run()
+      );
+
+      const out = {
+        id,
+        overall,
+        perModel,
+        grid,
+        sources,
+        percentile: await percentile(env, overall, 'account'),
+        subject: {
+          type: 'account',
+          platform,
+          handle: user.handle,
+          name: user.name,
+          thin: true,
+          fetched: counts.fetched,
+          kept: raw.length,
+          words: allWords.length,
+        },
+      };
+      if (env.BENCH === '1') out.debug = { tFetch: tFetchF, tScore: tScoreF, tTotal: Date.now() - t0 };
+      // outcome success; cause marks the fallback so analytics can count it.
+      return diag(json(out), 'success', {
+        handle: user.handle, cause: 'fallback', msFetch: tFetchF, msScore: tScoreF, pages: counts.pages,
+      });
     }
 
     const tFetch = Date.now() - t0;
