@@ -282,6 +282,23 @@ async function api(request, env, url, ctx) {
     return json(await gatherAnalytics(env, url.searchParams.get('range') || 'week'));
   }
 
+  // TEMPORARY (staging only): does Reddit serve RSS to Workers egress IPs?
+  if (env.BENCH === '1' && request.method === 'GET' && pathname === '/api/_rss') {
+    const name = url.searchParams.get('u') || 'spez';
+    if (!/^[A-Za-z0-9_-]{3,20}$/.test(name)) return json({ error: 'bad' }, 400);
+    const t0 = Date.now();
+    const res = await fetch(`https://www.reddit.com/user/${name}/comments.rss`, {
+      headers: { 'user-agent': 'howclankerareyou/1.0 rss reader (https://howclankerareyou.com)' },
+    });
+    const bodyText = await res.text();
+    return json({
+      status: res.status,
+      ms: Date.now() - t0,
+      bytes: bodyText.length,
+      entries: (bodyText.match(/<entry>/g) || []).length,
+    });
+  }
+
 
   // TEMPORARY latency bench (staging only: BENCH var unset in prod → 404).
   // Fires n parallel single-token logprob calls at the HF router to measure
