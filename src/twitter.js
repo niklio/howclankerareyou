@@ -116,7 +116,7 @@ const wordCount = (s) => (s ? s.split(/\s+/).filter(Boolean).length : 0);
 // timeline pagination in the common case (~1.4s). Paginates the search only
 // when the first page doesn't yield enough qualifying posts (sparse posters
 // like heavy retweeters). Returns:
-//   { user, samples: [{ id, text, words }], counts: { fetched, kept, words } }
+//   { user, samples: [{ id, text, words }], counts: { fetched, kept, words, pages } }
 // user is null when the search returned no tweets at all — the caller falls
 // back to getUser to distinguish protected / nonexistent / empty accounts.
 export async function searchSamples(env, handle, opts = {}) {
@@ -127,6 +127,7 @@ export async function searchSamples(env, handle, opts = {}) {
   let user = null;
   let fetched = 0;
   let words = 0;
+  let pages = 0;
   let cursor = '';
 
   for (let page = 0; page < maxPages; page++) {
@@ -136,6 +137,7 @@ export async function searchSamples(env, handle, opts = {}) {
       query,
       cursor,
     });
+    pages++;
     const tweets = data.tweets || data.data?.tweets || [];
     fetched += tweets.length;
     if (!user && tweets.length) {
@@ -169,5 +171,5 @@ export async function searchSamples(env, handle, opts = {}) {
     cursor = data.next_cursor;
   }
 
-  return { user, samples, counts: { fetched, kept: samples.length, words } };
+  return { user, samples, counts: { fetched, kept: samples.length, words, pages } };
 }

@@ -362,9 +362,15 @@ function wireResultButtons(fin, grid, url, live, acct) {
       share.onclick = () => shareResult(fin, grid, url, acct);
     }
     diagAgain.hidden = false;
-    diagAgain.onclick = () => (location.href = '/');
+    diagAgain.onclick = () => {
+      beacon('cta', fin.id, 'diag_again');
+      location.href = '/';
+    };
     selfInstead.hidden = false;
-    selfInstead.onclick = () => (location.href = '/#self');
+    selfInstead.onclick = () => {
+      beacon('cta', fin.id, 'self_instead');
+      location.href = '/#self';
+    };
     optout.hidden = false;
     return;
   }
@@ -383,8 +389,24 @@ function wireResultButtons(fin, grid, url, live, acct) {
     again.onclick = () => (location.href = '/#self');
   } else {
     take.hidden = false;
-    take.onclick = () => (location.href = '/');
+    take.onclick = () => {
+      beacon('cta', fin.id, 'take_test');
+      location.href = '/';
+    };
   }
+}
+
+// Fire-and-forget analytics beacon (share taps use their own inline copy so
+// they stay inside the click's transient activation).
+function beacon(type, session, meta) {
+  try {
+    fetch('/api/event', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type, session, meta }),
+      keepalive: true,
+    });
+  } catch {}
 }
 
 const EMOJI = ['🟥', '🟧', '🟨', '🟩']; // 0 clanker → 3 human

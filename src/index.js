@@ -70,7 +70,10 @@ export default {
     // Fire-and-forget traffic instrumentation.
     if (request.method === 'GET' && url.pathname === '/') logEvent(env, ctx, request, 'pageview');
     else if (['GET', 'HEAD'].includes(request.method) && /^\/r\/[0-9a-fA-F-]{8,}$/.test(url.pathname)) {
-      if (request.method === 'GET') logEvent(env, ctx, request, 'result_view');
+      // meta = the result id, so analytics can join views to results and
+      // split account-result opens from self-test opens.
+      if (request.method === 'GET')
+        logEvent(env, ctx, request, 'result_view', { meta: url.pathname.slice(3) });
       // Result pages can name a real person (diagnosed X accounts), so keep
       // them out of search indexes. The SPA shell is shared, so we noindex all
       // /r/ pages via header; the homepage stays indexable.
@@ -221,6 +224,13 @@ async function api(request, env, url, ctx) {
     return json({ mock: isMock(env) });
   }
 
+  // TEMPORARY (staging only, BENCH-gated like /api/_bench): unauthenticated
+  // analytics JSON so the v2 aggregation can be verified without the prod
+  // OAuth host. Prod never sets BENCH → 404.
+  if (env.BENCH === '1' && request.method === 'GET' && pathname === '/api/_analytics') {
+    return json(await gatherAnalytics(env, url.searchParams.get('range') || 'week'));
+  }
+
 
   // TEMPORARY latency bench (staging only: BENCH var unset in prod → 404).
   // Fires n parallel single-token logprob calls at the HF router to measure
@@ -258,11 +268,14 @@ async function api(request, env, url, ctx) {
     });
   }
 
-  // Client-side event beacon (share taps). Only 'share' is client-loggable;
-  // pageview/result_view are logged server-side to prevent inflation.
+  // Client-side event beacon (share taps + result-page CTA clicks). Only these
+  // are client-loggable; pageview/result_view are server-side to prevent
+  // inflation. cta meta is allowlisted so the events table stays clean.
   if (request.method === 'POST' && pathname === '/api/event') {
     const body = await request.json().catch(() => ({}));
     if (body.type === 'share') logEvent(env, ctx, request, 'share', { session: body.session });
+    else if (body.type === 'cta' && ['diag_again', 'self_instead', 'take_test'].includes(body.meta))
+      logEvent(env, ctx, request, 'cta', { session: body.session, meta: body.meta });
     return json({ ok: true });
   }
 
@@ -386,23 +399,41 @@ async function api(request, env, url, ctx) {
   // already renders. Costs many upstream calls, so it's rate-limited and
   // counts toward the daily cap.
   if (request.method === 'POST' && pathname === '/api/diagnose') {
+    const tStart = Date.now();
+    // Every exit logs exactly one `diagnose` event: outcome + timings (+ cache
+    // flag and search-page count for cost tracking). The analytics dashboard
+    // is built on these.
+    const diag = (res, outcome, extra = {}) => {
+      logEvent(env, ctx, request, 'diagnose', {
+        meta: JSON.stringify({
+          handle: extra.handle ? String(extra.handle).toLowerCase() : null,
+          outcome,
+          cached: !!extra.cached,
+          msTotal: Date.now() - tStart,
+          msFetch: extra.msFetch ?? null,
+          msScore: extra.msScore ?? null,
+          pages: extra.pages ?? 0,
+        }),
+      });
+      return res;
+    };
+
     if (env.DIAGNOSE_RL) {
       const ip = request.headers.get('cf-connecting-ip') || 'anon';
       const { success } = await env.DIAGNOSE_RL.limit({ key: ip });
       if (!success) {
-        logEvent(env, ctx, request, 'ratelimited', { meta: 'diagnose' });
-        return json({ error: 'slow down — one diagnosis at a time', code: 'ratelimited' }, 429);
+        return diag(json({ error: 'slow down — one diagnosis at a time', code: 'ratelimited' }, 429), 'ratelimited');
       }
     }
 
     const body = await request.json().catch(() => ({}));
     const handle = parseHandle(body.input);
     if (!handle) {
-      return json({ error: "that doesn't look like an X handle", code: 'badinput' }, 400);
+      return diag(json({ error: "that doesn't look like an X handle", code: 'badinput' }, 400), 'badinput');
     }
 
     if (await isBlocked(env, handle)) {
-      return json({ error: 'this account asked to be removed from the tool', code: 'blocked' }, 403);
+      return diag(json({ error: 'this account asked to be removed from the tool', code: 'blocked' }, 403), 'blocked', { handle });
     }
 
     // Cache: serve a recent diagnosis of the same account instead of re-running
@@ -417,25 +448,29 @@ async function api(request, env, url, ctx) {
       .first();
     if (cached) {
       const grid = cached.grid ? JSON.parse(cached.grid) : null;
-      return json({
-        id: cached.id,
-        overall: cached.overall,
-        perModel: JSON.parse(cached.per_model),
-        grid,
-        sources: cached.sources ? JSON.parse(cached.sources) : [],
-        percentile: await percentile(env, cached.overall, 'account'),
-        cached: true,
-        subject: {
-          type: 'account',
-          handle: cached.subject_handle,
-          name: cached.subject_name,
-          kept: grid ? grid.length : null,
-        },
-      });
+      return diag(
+        json({
+          id: cached.id,
+          overall: cached.overall,
+          perModel: JSON.parse(cached.per_model),
+          grid,
+          sources: cached.sources ? JSON.parse(cached.sources) : [],
+          percentile: await percentile(env, cached.overall, 'account'),
+          cached: true,
+          subject: {
+            type: 'account',
+            handle: cached.subject_handle,
+            name: cached.subject_name,
+            kept: grid ? grid.length : null,
+          },
+        }),
+        'success',
+        { handle: cached.subject_handle, cached: true }
+      );
     }
 
     if (await overDailyCap(env)) {
-      return json({ error: 'the robots are resting — daily limit reached, try again tomorrow', code: 'cap' }, 429);
+      return diag(json({ error: 'the robots are resting — daily limit reached, try again tomorrow', code: 'cap' }, 429), 'cap', { handle });
     }
 
     const t0 = Date.now();
@@ -450,27 +485,29 @@ async function api(request, env, url, ctx) {
         minWords: MIN_POST_WORDS,
       }));
     } catch (err) {
-      return json({ error: 'the post source is having a moment — try again in a sec', code: 'upstream' }, 502);
+      return diag(json({ error: 'the post source is having a moment — try again in a sec', code: 'upstream' }, 502), 'upstream', { handle });
     }
     if (!user) {
       try {
         const u = await getUser(env, handle);
         if (u.protected)
-          return json({ error: `@${u.handle}'s posts are protected`, code: 'protected', handle: u.handle }, 422);
-        return json(
-          { error: `not enough public posts to grade @${u.handle} fairly`, code: 'thin', handle: u.handle, kept: 0 },
-          422
+          return diag(json({ error: `@${u.handle}'s posts are protected`, code: 'protected', handle: u.handle }, 422), 'protected', { handle: u.handle });
+        return diag(
+          json({ error: `not enough public posts to grade @${u.handle} fairly`, code: 'thin', handle: u.handle, kept: 0 }, 422),
+          'thin',
+          { handle: u.handle, pages: counts.pages }
         );
       } catch (err) {
         if (err.code === 'notfound')
-          return json({ error: `can't find @${handle} on X`, code: 'notfound' }, 404);
-        return json({ error: 'the post source is having a moment — try again in a sec', code: 'upstream' }, 502);
+          return diag(json({ error: `can't find @${handle} on X`, code: 'notfound' }, 404), 'notfound', { handle });
+        return diag(json({ error: 'the post source is having a moment — try again in a sec', code: 'upstream' }, 502), 'upstream', { handle });
       }
     }
     if (samples.length < MIN_SAMPLE_TWEETS) {
-      return json(
-        { error: `not enough public posts to grade @${user.handle} fairly`, code: 'thin', handle: user.handle, kept: samples.length },
-        422
+      return diag(
+        json({ error: `not enough public posts to grade @${user.handle} fairly`, code: 'thin', handle: user.handle, kept: samples.length }, 422),
+        'thin',
+        { handle: user.handle, pages: counts.pages }
       );
     }
 
@@ -518,7 +555,12 @@ async function api(request, env, url, ctx) {
     }).filter(Boolean);
 
     if (!perModel.length) {
-      return json({ error: 'scoring failed — try again in a sec', code: 'upstream' }, 502);
+      return diag(json({ error: 'scoring failed — try again in a sec', code: 'upstream' }, 502), 'upstream', {
+        handle: user.handle,
+        msFetch: tFetch,
+        msScore: tScore,
+        pages: counts.pages,
+      });
     }
 
     // Nearest (least-surprised) model sets the number, same as the self-test.
@@ -565,7 +607,12 @@ async function api(request, env, url, ctx) {
       },
     };
     if (env.BENCH === '1') out.debug = { tFetch, tScore, tTotal: Date.now() - t0 };
-    return json(out);
+    return diag(json(out), 'success', {
+      handle: user.handle,
+      msFetch: tFetch,
+      msScore: tScore,
+      pages: counts.pages,
+    });
   }
 
   // Opt-out: remove an account from the tool. Blocks future diagnoses and

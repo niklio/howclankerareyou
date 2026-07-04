@@ -2,7 +2,9 @@
 // are scoped to a time range (day/week/month/all); breakdowns stay all-time.
 // Everything is derived from the product tables (sessions, answers, results,
 // usage) plus the lightweight `events` table (pageviews, result-page opens,
-// share taps). All bucketing is UTC.
+// share taps, and one `diagnose` event per account-diagnosis attempt with
+// outcome/timings/cost in its meta JSON). All bucketing is UTC. All queries
+// are additive over the original schema — old rows are never migrated.
 import { QUESTIONS } from './questions.js';
 import { MODELS } from './scoring.js';
 
@@ -14,10 +16,26 @@ const COST_PER_CALL = {
   'Qwen/Qwen3-235B-A22B-Instruct-2507:nscale': 60 * 0.2e-6 + 0.6e-6,
 };
 const DEFAULT_COST = 1.1e-5;
+// A fresh diagnosis = 15 echo calls (~60 prompt tokens each at Qwen-235B-class
+// rates) + `pages` twitterapi advanced-search calls. Cached hits cost 0.
+const DIAGNOSE_HF_COST = 15 * 60 * 0.13e-6;
+const TWITTERAPI_PAGE_COST = 20 * 0.15e-3; // $0.15/1k tweets, 20 tweets/page
 const RANGES = new Set(['day', 'week', 'month', 'all']);
+// results-table population filters (old self-test rows predate subject_type).
+const SELF_COND = `(subject_type IS NULL OR subject_type = 'self')`;
+const ACCT_COND = `subject_type = 'account'`;
 
 const dayExpr = (ms) => `strftime('%Y-%m-%d', ${ms}/1000, 'unixepoch')`;
 const today = () => new Date().toISOString().slice(0, 10);
+
+// json_extract returns 0/1 for JSON booleans (and null for missing).
+const truthy = (v) => v === 1 || v === '1' || v === true;
+// Roll pre-fetched rows (bucketed as r.d) into {d, n} pairs for fillK.
+function aggCount(rows, pred) {
+  const m = {};
+  for (const r of rows) if (pred(r)) m[r.d] = (m[r.d] || 0) + 1;
+  return Object.entries(m).map(([d, n]) => ({ d, n }));
+}
 
 // Bucket keys + the SQL bucket expression and window condition for a range.
 // day → 24 hourly buckets over the last 24h; else → daily buckets.
@@ -59,7 +77,7 @@ export async function gatherAnalytics(env, range = 'week') {
 
   // --- windowed trend series ---
   const started = await seriesQ(`SELECT ${bucket('created_at')} d, COUNT(*) n FROM sessions WHERE ${cond('created_at')} GROUP BY d`);
-  const completed = await seriesQ(`SELECT ${bucket('created_at')} d, COUNT(*) n FROM results WHERE ${cond('created_at')} GROUP BY d`);
+  const completed = await seriesQ(`SELECT ${bucket('created_at')} d, COUNT(*) n FROM results WHERE ${SELF_COND} AND ${cond('created_at')} GROUP BY d`);
   const pageviews = await seriesQ(`SELECT ${bucket('ts')} d, COUNT(*) n FROM events WHERE type='pageview' AND ${cond('ts')} GROUP BY d`);
   const uniques = await seriesQ(`SELECT ${bucket('ts')} d, COUNT(DISTINCT visitor) n FROM events WHERE type='pageview' AND ${cond('ts')} GROUP BY d`);
   const resultViews = await seriesQ(`SELECT ${bucket('ts')} d, COUNT(*) n FROM events WHERE type='result_view' AND ${cond('ts')} GROUP BY d`);
@@ -69,6 +87,41 @@ export async function gatherAnalytics(env, range = 'week') {
   const cbm = await q(`SELECT ${bucket('s.created_at')} d, model, SUM(steps) n FROM answers a JOIN sessions s ON a.session_id=s.id WHERE ${cond('s.created_at')} GROUP BY d, model`);
   const spendBy = {};
   for (const r of cbm) spendBy[r.d] = (spendBy[r.d] || 0) + r.n * (COST_PER_CALL[r.model] ?? DEFAULT_COST);
+
+  // --- diagnose flow (from `diagnose` events; meta is JSON) ---
+  const dOut = (p) => `json_extract(meta,'$.${p}')`;
+  const dRows = await q(
+    `SELECT ${bucket('ts')} d, ${dOut('outcome')} outcome, ${dOut('cached')} cached,
+            ${dOut('msTotal')} ms, ${dOut('pages')} pages
+     FROM events WHERE type='diagnose' AND ${cond('ts')}`
+  );
+  const diagAttempts = fillK(aggCount(dRows, () => true));
+  const diagSuccess = fillK(aggCount(dRows, (r) => r.outcome === 'success'));
+  const diagCachedN = dRows.filter((r) => r.outcome === 'success' && truthy(r.cached)).length;
+  const diagFreshN = dRows.filter((r) => r.outcome === 'success' && !truthy(r.cached)).length;
+  const diagUpstream = fillK(aggCount(dRows, (r) => r.outcome === 'upstream'));
+  // Latency percentiles per bucket (fresh successes only — cache hits are
+  // trivially fast and would flatter the chart).
+  const latP50 = [], latP90 = [];
+  {
+    const byBucket = {};
+    for (const r of dRows)
+      if (r.outcome === 'success' && !truthy(r.cached) && r.ms != null)
+        (byBucket[r.d] ||= []).push(Number(r.ms));
+    for (const k of keys) {
+      const v = (byBucket[k] || []).sort((a, b) => a - b);
+      latP50.push([k, v.length ? Math.round(v[Math.floor(0.5 * (v.length - 1))]) : 0]);
+      latP90.push([k, v.length ? Math.round(v[Math.floor(0.9 * (v.length - 1))]) : 0]);
+    }
+  }
+  // Diagnose spend: fresh diagnoses × echo cost + twitterapi pages. Added to
+  // the same per-bucket spend map as the self-test calls.
+  for (const r of dRows) {
+    if (truthy(r.cached)) continue;
+    const pages = Number(r.pages) || 0;
+    const c = (r.outcome === 'success' ? DIAGNOSE_HF_COST : 0) + pages * TWITTERAPI_PAGE_COST;
+    if (c) spendBy[r.d] = (spendBy[r.d] || 0) + c;
+  }
   const spendSeries = keys.map((k) => [k, Math.round((spendBy[k] || 0) * 1e6) / 1e6]);
 
   // --- headline (windowed sums) ---
@@ -76,6 +129,8 @@ export async function gatherAnalytics(env, range = 'week') {
   const totalCompleted = sum(completed);
   const totalShares = sum(shares);
   const totalResultViews = sum(resultViews);
+  const totalDiagAttempts = sum(diagAttempts);
+  const totalDiagSuccess = sum(diagSuccess);
 
   // --- breakdowns (all-time) ---
   const funnelRows = await q(`SELECT question_id, COUNT(DISTINCT session_id) n FROM answers GROUP BY question_id`);
@@ -88,11 +143,17 @@ export async function gatherAnalytics(env, range = 'week') {
     .map((qq) => ({ prompt: qq.prompt, avgKl: Math.round(qkMap[qq.id] * 100) / 100 }))
     .sort((a, b) => a.avgKl - b.avgKl);
 
-  const resultRows = await q(`SELECT overall, per_model FROM results`);
-  const hist = Array.from({ length: 10 }, (_, i) => ({ bucket: `${i * 10}-${i * 10 + 10}`, count: 0 }));
+  // Score histograms split by population: mixing humans and accounts in one
+  // distribution would mislead both.
+  const resultRows = await q(`SELECT overall, per_model, subject_type FROM results`);
+  const emptyHist = () => Array.from({ length: 10 }, (_, i) => ({ bucket: `${i * 10}-${i * 10 + 10}`, count: 0 }));
+  const hist = emptyHist(); // self-test (humans)
+  const histAccounts = emptyHist();
   const modelCount = Object.fromEntries(MODELS.map((m) => [m.label, 0]));
   for (const r of resultRows) {
-    hist[Math.min(9, Math.max(0, Math.floor(r.overall / 10)))].count++;
+    const h = r.subject_type === 'account' ? histAccounts : hist;
+    h[Math.min(9, Math.max(0, Math.floor(r.overall / 10)))].count++;
+    if (r.subject_type === 'account') continue; // inner-clanker share is a self-test stat
     try {
       const top = JSON.parse(r.per_model).sort((a, b) => b.score - a.score)[0];
       if (top && modelCount[top.label] != null) modelCount[top.label]++;
@@ -103,6 +164,32 @@ export async function gatherAnalytics(env, range = 'week') {
     `SELECT COALESCE(ref,'direct') ref, COUNT(*) n FROM events WHERE type='pageview' GROUP BY ref ORDER BY n DESC LIMIT 10`
   );
 
+  // Diagnose outcome mix (all-time) + most-diagnosed handles. Lookup counts
+  // come from events (includes cache hits); each handle's score is its latest
+  // stored result (may be gone if opted out — shown without a score then).
+  const outcomeRows = await q(
+    `SELECT ${dOut('outcome')} o, COUNT(*) n FROM events WHERE type='diagnose' GROUP BY o ORDER BY n DESC`
+  );
+  const topHandleRows = await q(
+    `SELECT ${dOut('handle')} h, COUNT(*) n FROM events
+     WHERE type='diagnose' AND ${dOut('outcome')}='success' AND ${dOut('handle')} IS NOT NULL
+     GROUP BY h ORDER BY n DESC LIMIT 10`
+  );
+  const scoreByHandle = {};
+  for (const r of await q(
+    `SELECT lower(subject_handle) h, overall FROM results WHERE ${ACCT_COND} ORDER BY created_at ASC`
+  ))
+    scoreByHandle[r.h] = r.overall; // ASC → last write wins = latest score
+  const topHandles = topHandleRows.map((r) => ({
+    handle: r.h,
+    lookups: r.n,
+    score: scoreByHandle[r.h] ?? null,
+  }));
+
+  // Viral-loop CTA clicks (all-time).
+  const ctaRows = await q(`SELECT meta, COUNT(*) n FROM events WHERE type='cta' GROUP BY meta`);
+  const cta = Object.fromEntries(ctaRows.map((r) => [r.meta, r.n]));
+
   // --- budget (operational: today's cap + month-to-date, range-independent) ---
   const monthStart = today().slice(0, 8) + '01';
   const mtdCallsRow = await q(`SELECT SUM(steps) n FROM answers a JOIN sessions s ON a.session_id=s.id WHERE ${dayExpr('s.created_at')} >= '${monthStart}'`);
@@ -112,29 +199,52 @@ export async function gatherAnalytics(env, range = 'week') {
   );
   const capRow = await q(`SELECT calls FROM usage WHERE day='${today()}'`);
   const cap = Number(env.DAILY_CALL_CAP || 0);
+  // twitterapi credit-burn proxy: search pages fetched today (no balance API).
+  const twStart = new Date(today() + 'T00:00:00Z').getTime();
+  const twRow = await q(
+    `SELECT SUM(${dOut('pages')}) n FROM events WHERE type='diagnose' AND ts >= ${twStart}`
+  );
 
   return {
     updated: new Date().toISOString(),
     range,
     headline: {
+      diagnoses: totalDiagSuccess,
+      diagnosesCached: diagCachedN,
+      diagnosesFresh: diagFreshN,
+      diagnoseSuccessRate: totalDiagAttempts
+        ? Math.round((100 * totalDiagSuccess) / totalDiagAttempts)
+        : 0,
       completedRuns: totalCompleted,
       completionRate: totalStarted ? Math.round((100 * totalCompleted) / totalStarted) : 0,
-      shareRate: totalCompleted ? Math.round((100 * totalShares) / totalCompleted) : 0,
+      shareRate:
+        totalCompleted + totalDiagSuccess
+          ? Math.round((100 * totalShares) / (totalCompleted + totalDiagSuccess))
+          : 0,
       kFactor: totalShares ? Math.round((100 * totalResultViews) / totalShares) / 100 : 0,
       spend: Math.round(sum(spendSeries) * 100) / 100,
     },
     plots: [
-      { label: 'Diagnostics started', series: started },
-      { label: 'Runs completed', series: completed },
+      { label: 'Diagnoses (attempts)', series: diagAttempts },
+      { label: 'Diagnoses (successes)', series: diagSuccess },
+      { label: 'Diagnose latency p50 (ms)', series: latP50 },
+      { label: 'Diagnose latency p90 (ms)', series: latP90 },
+      { label: 'Upstream failures', series: diagUpstream },
+      { label: 'Self-tests started', series: started },
+      { label: 'Self-tests completed', series: completed },
       { label: 'Page views', series: pageviews },
       { label: 'Unique visitors', series: uniques },
       { label: 'Result-page opens', series: resultViews },
       { label: 'Share actions', series: shares },
-      { label: 'Model API calls', series: calls },
+      { label: 'Model API calls (self-test)', series: calls },
       { label: 'Estimated spend ($)', series: spendSeries },
     ],
     funnel,
     scoreHistogram: hist,
+    accountHistogram: histAccounts,
+    outcomes: outcomeRows.map((r) => ({ outcome: r.o || 'unknown', count: r.n })),
+    topHandles,
+    cta,
     modelShare,
     questionClanker,
     referrers: referrers.map((r) => ({ ref: r.ref, count: r.n })),
@@ -144,6 +254,7 @@ export async function gatherAnalytics(env, range = 'week') {
       dailyCap: cap,
       todayCalls: capRow[0]?.calls || 0,
       capPct: cap ? Math.round((100 * (capRow[0]?.calls || 0)) / cap) : 0,
+      twitterPagesToday: twRow[0]?.n || 0,
     },
   };
 }
