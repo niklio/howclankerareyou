@@ -124,13 +124,29 @@ export async function gatherAnalytics(env, range = 'week') {
   }
   const spendSeries = keys.map((k) => [k, Math.round((spendBy[k] || 0) * 1e6) / 1e6]);
 
-  // --- headline (windowed sums) ---
+  // --- the loop (windowed sums) ---
+  // One viral loop, two flavors of "play": diagnosing an account and taking
+  // the self-test both produce a shareable result. visitors → plays → shares
+  // → share opens → replays (result-page CTA clicks back into a new play).
   const totalStarted = sum(started);
   const totalCompleted = sum(completed);
   const totalShares = sum(shares);
   const totalResultViews = sum(resultViews);
   const totalDiagAttempts = sum(diagAttempts);
   const totalDiagSuccess = sum(diagSuccess);
+  const totalUniques = sum(uniques);
+  const plays = keys.map((k, i) => [k, diagSuccess[i][1] + completed[i][1]]);
+  const totalPlays = totalDiagSuccess + totalCompleted;
+  const replayRows = await q(
+    `SELECT COUNT(*) n FROM events WHERE type='cta' AND ${cond('ts')}`
+  );
+  const totalReplays = replayRows[0]?.n || 0;
+  const playRate = totalUniques ? totalPlays / totalUniques : 0;
+  const shareRate = totalPlays ? totalShares / totalPlays : 0;
+  const opensPerShare = totalShares ? totalResultViews / totalShares : 0;
+  // Estimated viral coefficient: new plays a play generates via sharing.
+  // K = P(share) × opens per share × P(opened → plays). >1 = self-sustaining.
+  const kViral = shareRate * opensPerShare * playRate;
 
   // --- breakdowns (all-time) ---
   const funnelRows = await q(`SELECT question_id, COUNT(DISTINCT session_id) n FROM answers GROUP BY question_id`);
@@ -143,17 +159,17 @@ export async function gatherAnalytics(env, range = 'week') {
     .map((qq) => ({ prompt: qq.prompt, avgKl: Math.round(qkMap[qq.id] * 100) / 100 }))
     .sort((a, b) => a.avgKl - b.avgKl);
 
-  // Score histograms split by population: mixing humans and accounts in one
-  // distribution would mislead both.
+  // One score distribution across all results — a play is a play in the loop
+  // view. (Populations are calibrated separately but land on the same 0-100
+  // scale; the play-mix card carries the flavor split.)
   const resultRows = await q(`SELECT overall, per_model, subject_type FROM results`);
-  const emptyHist = () => Array.from({ length: 10 }, (_, i) => ({ bucket: `${i * 10}-${i * 10 + 10}`, count: 0 }));
-  const hist = emptyHist(); // self-test (humans)
-  const histAccounts = emptyHist();
+  const hist = Array.from({ length: 10 }, (_, i) => ({ bucket: `${i * 10}-${i * 10 + 10}`, count: 0 }));
   const modelCount = Object.fromEntries(MODELS.map((m) => [m.label, 0]));
+  let allTimeAccounts = 0, allTimeSelf = 0;
   for (const r of resultRows) {
-    const h = r.subject_type === 'account' ? histAccounts : hist;
-    h[Math.min(9, Math.max(0, Math.floor(r.overall / 10)))].count++;
-    if (r.subject_type === 'account') continue; // inner-clanker share is a self-test stat
+    hist[Math.min(9, Math.max(0, Math.floor(r.overall / 10)))].count++;
+    if (r.subject_type === 'account') { allTimeAccounts++; continue; } // inner-clanker is a self-test stat
+    allTimeSelf++;
     try {
       const top = JSON.parse(r.per_model).sort((a, b) => b.score - a.score)[0];
       if (top && modelCount[top.label] != null) modelCount[top.label]++;
@@ -209,39 +225,47 @@ export async function gatherAnalytics(env, range = 'week') {
     updated: new Date().toISOString(),
     range,
     headline: {
-      diagnoses: totalDiagSuccess,
-      diagnosesCached: diagCachedN,
-      diagnosesFresh: diagFreshN,
-      diagnoseSuccessRate: totalDiagAttempts
-        ? Math.round((100 * totalDiagSuccess) / totalDiagAttempts)
-        : 0,
-      completedRuns: totalCompleted,
-      completionRate: totalStarted ? Math.round((100 * totalCompleted) / totalStarted) : 0,
-      shareRate:
-        totalCompleted + totalDiagSuccess
-          ? Math.round((100 * totalShares) / (totalCompleted + totalDiagSuccess))
-          : 0,
-      kFactor: totalShares ? Math.round((100 * totalResultViews) / totalShares) / 100 : 0,
+      kViral: Math.round(kViral * 100) / 100,
+      plays: totalPlays,
+      playsAccount: totalDiagSuccess,
+      playsSelf: totalCompleted,
+      playRate: Math.round(100 * playRate),
+      shareRate: Math.round(100 * shareRate),
+      opensPerShare: Math.round(100 * opensPerShare) / 100,
       spend: Math.round(sum(spendSeries) * 100) / 100,
     },
+    // The loop, as a funnel (windowed).
+    loop: [
+      { stage: 'unique visitors', n: totalUniques },
+      { stage: 'plays (result created)', n: totalPlays },
+      { stage: 'shares', n: totalShares },
+      { stage: 'share-link opens', n: totalResultViews },
+      { stage: 'replays (CTA back in)', n: totalReplays },
+    ],
     plots: [
-      { label: 'Diagnoses (attempts)', series: diagAttempts },
-      { label: 'Diagnoses (successes)', series: diagSuccess },
+      { label: 'Plays', series: plays },
+      { label: 'Unique visitors', series: uniques },
+      { label: 'Share actions', series: shares },
+      { label: 'Share-link opens', series: resultViews },
+    ],
+    healthPlots: [
       { label: 'Diagnose latency p50 (ms)', series: latP50 },
       { label: 'Diagnose latency p90 (ms)', series: latP90 },
       { label: 'Upstream failures', series: diagUpstream },
-      { label: 'Self-tests started', series: started },
-      { label: 'Self-tests completed', series: completed },
+      { label: 'Diagnoses (attempts)', series: diagAttempts },
       { label: 'Page views', series: pageviews },
-      { label: 'Unique visitors', series: uniques },
-      { label: 'Result-page opens', series: resultViews },
-      { label: 'Share actions', series: shares },
-      { label: 'Model API calls (self-test)', series: calls },
       { label: 'Estimated spend ($)', series: spendSeries },
     ],
+    playMix: [
+      { label: 'diagnose an account', count: allTimeAccounts, cached: diagCachedN, fresh: diagFreshN },
+      { label: 'self-test', count: allTimeSelf },
+    ],
+    diagnoseSuccessRate: totalDiagAttempts
+      ? Math.round((100 * totalDiagSuccess) / totalDiagAttempts)
+      : 100,
+    selfCompletionRate: totalStarted ? Math.round((100 * totalCompleted) / totalStarted) : 0,
     funnel,
     scoreHistogram: hist,
-    accountHistogram: histAccounts,
     outcomes: outcomeRows.map((r) => ({ outcome: r.o || 'unknown', count: r.n })),
     topHandles,
     cta,
