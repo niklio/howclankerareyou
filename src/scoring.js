@@ -27,10 +27,15 @@ const ROUTER = 'https://router.huggingface.co/v1/chat/completions';
 // model's own output, so anchoring at self alone made any non-panel LLM score
 // only ~50%. Provider pins lock a backend that returns top-20 logprobs and
 // accepts an assistant-prefixed continuation.
+// d0     — anchor for the anchored self-test (sentence completion).
+// d0text — anchor for free-form post scoring (see TEXT_PRIME); higher because
+//          an unanchored post is more surprising token-for-token than a
+//          completion continuing a shared stem. Calibrated 2026-07-03 on AI
+//          vs human sample posts across all three models.
 export const MODELS = [
-  { id: 'meta-llama/Llama-3.1-8B-Instruct:nscale', label: 'Llama 3.1 8B', maker: 'Meta', d0: 5.7 },
-  { id: 'deepseek-ai/DeepSeek-V3-0324:novita', label: 'DeepSeek V3', maker: 'DeepSeek', d0: 4.2 },
-  { id: 'Qwen/Qwen3-235B-A22B-Instruct-2507:nscale', label: 'Qwen3 235B', maker: 'Alibaba', d0: 7.7 },
+  { id: 'meta-llama/Llama-3.1-8B-Instruct:nscale', label: 'Llama 3.1 8B', maker: 'Meta', d0: 5.7, d0text: 6.2 },
+  { id: 'deepseek-ai/DeepSeek-V3-0324:novita', label: 'DeepSeek V3', maker: 'DeepSeek', d0: 4.2, d0text: 5.0 },
+  { id: 'Qwen/Qwen3-235B-A22B-Instruct-2507:nscale', label: 'Qwen3 235B', maker: 'Alibaba', d0: 7.7, d0text: 8.0 },
 ];
 
 export function isMock(env) {
@@ -46,6 +51,18 @@ const MAX_STEPS = 10;
 const FLOOR_MARGIN = 2; // unmatched token: min(top-20) - margin, in nats
 const FLOOR_MIN = -14;
 
+// --- free-form text scoring (the "diagnose an X account" feature) -----------
+// The self-test scores a sentence *completion* anchored by a shared stem. A
+// tweet has no stem, so we frame the model as composing a post from scratch and
+// walk the real text token-by-token. Empirically the AI↔human surprisal gap on
+// a single unanchored post is smaller than on an anchored completion, but it
+// averages out over many posts, and the free-form d0/λ below are calibrated for
+// this regime (see scoreText). Longer step budget since posts run past a stem.
+const TEXT_PRIME =
+  `Write a single short, natural social media post. ` +
+  `Plain text only, no quotation marks, no hashtags.`;
+const MAX_STEPS_TEXT = 45;
+
 // Re-anchored 2026-07-03 so any-LLM paste scores high: with the generic-LLM d0
 // above and overall = nearest-model similarity, frontier-LLM completions land
 // ~90–100% and quirky human answers ~20% (human sits ~2.2 nats past the anchor
@@ -57,24 +74,54 @@ export function clankerScore(avgKL, d0) {
   return Math.round(1000 * Math.exp(-Math.max(0, avgKL - d0) / LAMBDA)) / 10;
 }
 
+// Free-form posts separate less per-token than anchored completions, so the
+// free-form curve is gentler (smaller λ would over-punish the small AI↔human
+// gap into all-or-nothing). Calibrated alongside d0text.
+const LAMBDA_TEXT = 1.1;
+
+export function clankerScoreText(avgKL, d0text) {
+  return Math.round(1000 * Math.exp(-Math.max(0, avgKL - d0text) / LAMBDA_TEXT)) / 10;
+}
+
+// Anchored self-test: a shared sentence stem primes the model, and the user's
+// completion is the assistant prefix we walk. seed = the stem, so every step is
+// conditioned on "stem + words so far".
 export async function scoreModel(env, model, promptText, completion) {
-  let consumed = promptText;
-  let remaining = ' ' + completion.trim();
+  return walk(env, model.id, instruction(promptText), completion, {
+    maxSteps: MAX_STEPS,
+    seed: promptText,
+  });
+}
+
+// Free-form post: no stem. The model is primed to compose a post (TEXT_PRIME)
+// and we walk the real post text from an empty prefix. Same greedy machinery,
+// longer step budget, empty seed.
+export async function scoreText(env, model, text) {
+  return walk(env, model.id, TEXT_PRIME, text, { maxSteps: MAX_STEPS_TEXT, seed: '' });
+}
+
+// Greedy top-20 token walk shared by both scorers. `userMsg` is the fixed user
+// turn; `text` is the human text whose surprisal we measure; `seed` is the
+// assistant prefix already "written" before the text (a stem for the self-test,
+// empty for free-form). Returns { avgKL, steps, perStep, perWord } or null if
+// the provider never produced usable logprobs.
+async function walk(env, modelId, userMsg, text, { maxSteps, seed = '' }) {
+  let consumed = seed;
+  let remaining = ' ' + text.trim();
   const perStep = [];
 
-  // Word spans over the (space-prefixed) completion, so we can roll the
-  // per-token logprobs up into a per-word surprisal for the share grid.
-  // Token boundaries differ per model, but words are the user's own, so
-  // per-word values align across models.
-  const source = ' ' + completion.trim();
+  // Word spans over the (space-prefixed) text, so we can roll the per-token
+  // logprobs up into a per-word surprisal for the share grid. Token boundaries
+  // differ per model, but words are the human's own, so per-word values align.
+  const source = ' ' + text.trim();
   const words = [];
   for (const m of source.matchAll(/\S+/g)) {
     words.push({ start: m.index, end: m.index + m[0].length, lps: [] });
   }
   let charPos = 0;
 
-  for (let step = 0; step < MAX_STEPS && remaining.trim().length; step++) {
-    const cands = await topLogprobs(env, model.id, promptText, consumed);
+  for (let step = 0; step < maxSteps && remaining.trim().length; step++) {
+    const cands = await topLogprobs(env, modelId, userMsg, consumed);
     if (!cands) {
       if (perStep.length >= 2) break; // provider flaked mid-answer; keep what we have
       return null;
@@ -116,7 +163,7 @@ export function heatLevel(kl) {
   return 3;
 }
 
-async function topLogprobs(env, modelId, promptText, assistantText, retries = 3) {
+async function topLogprobs(env, modelId, userMsg, assistantText, retries = 3) {
   if (isMock(env)) return mockTopLogprobs(modelId, assistantText);
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -129,7 +176,7 @@ async function topLogprobs(env, modelId, promptText, assistantText, retries = 3)
         body: JSON.stringify({
           model: modelId,
           messages: [
-            { role: 'user', content: instruction(promptText) },
+            { role: 'user', content: userMsg },
             { role: 'assistant', content: assistantText },
           ],
           max_tokens: 1,

@@ -220,6 +220,76 @@ h2 {
   letter-spacing: 0.02em;
 }
 
+/* ---- diagnose: homepage search + gathering ---- */
+
+.searchbar {
+  display: flex;
+  max-width: 560px;
+  margin: 22px 0 12px;
+  box-shadow: 6px 6px 0 var(--fg);
+}
+.searchbar input {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  background: #faf8f2;
+  border: 1px solid var(--fg);
+  border-right: none;
+  color: var(--fg);
+  font: inherit;
+  font-size: 18px;
+  padding: 16px 16px;
+  outline: none;
+}
+.searchbar input:focus { background: #fff; }
+.searchbar button {
+  font-family: "Orbitron", sans-serif;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  background: var(--accent);
+  color: #fff;
+  border: 1px solid var(--fg);
+  box-shadow: none;
+  white-space: nowrap;
+  margin: 0;
+  padding: 0 24px;
+}
+.searchbar button:hover { background: var(--fg); color: #fff; }
+.searchbar button:disabled { opacity: 0.6; cursor: default; }
+
+.secondary { font-size: 14px; color: var(--dim); }
+.secondary a { color: var(--accent); font-weight: 600; text-decoration: none; border-bottom: 1px solid var(--accent); }
+
+.scan { list-style: none; padding: 0; margin: 20px 0; }
+.scan li { padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.scan .ok { color: var(--good); }
+.scan .wait { color: var(--dim); }
+.scan .bad { color: var(--accent); }
+#gather-fill { height: 100%; width: 5%; background: var(--accent); transition: width 0.5s ease; }
+
+/* ---- diagnose: sampled posts on the result page ---- */
+
+.src {
+  background: #faf8f2;
+  border: 1px solid var(--line);
+  padding: 11px 13px;
+  font-size: 13px;
+  margin: 7px 0;
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+.src .badge { color: var(--accent); font-weight: 600; white-space: nowrap; }
+#res-optout { margin-top: 14px; }
+#res-optout a { color: var(--accent); }
+
+@media (max-width: 560px) {
+  .searchbar { flex-direction: column; box-shadow: none; }
+  .searchbar input { border-right: 1px solid var(--fg); }
+  .searchbar button { box-shadow: 5px 5px 0 var(--fg); margin-top: 10px; padding: 14px; }
+}
+
 @media (max-width: 430px) {
   main { padding: 5vh 20px 32px; }
   .tag { margin-bottom: 16px; }

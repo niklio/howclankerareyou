@@ -1,5 +1,14 @@
 import { QUESTIONS } from './questions.js';
-import { MODELS, scoreModel, clankerScore, isMock, heatLevel } from './scoring.js';
+import {
+  MODELS,
+  scoreModel,
+  scoreText,
+  clankerScore,
+  clankerScoreText,
+  isMock,
+  heatLevel,
+} from './scoring.js';
+import { parseHandle, getUser, getSamples } from './twitter.js';
 import * as auth from './auth.js';
 import { gatherAnalytics } from './analytics.js';
 import { DASHBOARD_HTML } from './dashboard.js';
@@ -9,6 +18,20 @@ const ANALYTICS_URL = 'https://analytics.howclankerareyou.com/';
 const CANONICAL = 'https://howclankerareyou.com';
 const COOKIE_DOMAIN = '.howclankerareyou.com';
 const SESSION_COOKIE = 'hcay_session';
+
+// --- diagnose tuning --------------------------------------------------------
+// Sample = the 5 most recent standalone posts (no retweets, no replies) LONG
+// ENOUGH to survive the drop: each post must have > DROP_K words. Drop each
+// post's first DROP_K scored tokens before averaging: with no shared stem, the
+// opening tokens are unpredictable for everyone and drown the AI↔human signal.
+// Words are the sampling-time proxy for tokens — the greedy walk consumes at
+// most one word per step, so > DROP_K words guarantees > DROP_K scored tokens
+// on every model, and all 5 posts contribute. Thin accounts can't be graded
+// fairly, so require a floor of posts and words.
+const SAMPLE_TWEETS = 5;
+const DROP_K = 10;
+const MIN_SAMPLE_TWEETS = 5;
+const MIN_SAMPLE_WORDS = 40;
 
 export default {
   async fetch(request, env, ctx) {
@@ -40,8 +63,16 @@ export default {
     }
     // Fire-and-forget traffic instrumentation.
     if (request.method === 'GET' && url.pathname === '/') logEvent(env, ctx, request, 'pageview');
-    else if (request.method === 'GET' && /^\/r\/[0-9a-fA-F-]{8,}$/.test(url.pathname))
+    else if (request.method === 'GET' && /^\/r\/[0-9a-fA-F-]{8,}$/.test(url.pathname)) {
       logEvent(env, ctx, request, 'result_view');
+      // Result pages can name a real person (diagnosed X accounts), so keep
+      // them out of search indexes. The SPA shell is shared, so we noindex all
+      // /r/ pages via header; the homepage stays indexable.
+      const res = await env.ASSETS.fetch(request);
+      const headers = new Headers(res.headers);
+      headers.set('x-robots-tag', 'noindex');
+      return new Response(res.body, { status: res.status, headers });
+    }
     return env.ASSETS.fetch(request);
   },
 };
@@ -303,21 +334,201 @@ async function api(request, env, url, ctx) {
       overall,
       perModel,
       grid,
-      percentile: await percentile(env, overall),
+      percentile: await percentile(env, overall, 'self'),
     });
+  }
+
+  // Diagnose an X account: resolve → pull recent posts → score each post
+  // against every model → aggregate into the same result shape the share page
+  // already renders. Costs many upstream calls, so it's rate-limited and
+  // counts toward the daily cap.
+  if (request.method === 'POST' && pathname === '/api/diagnose') {
+    if (env.DIAGNOSE_RL) {
+      const ip = request.headers.get('cf-connecting-ip') || 'anon';
+      const { success } = await env.DIAGNOSE_RL.limit({ key: ip });
+      if (!success) {
+        logEvent(env, ctx, request, 'ratelimited', { meta: 'diagnose' });
+        return json({ error: 'slow down — one diagnosis at a time', code: 'ratelimited' }, 429);
+      }
+    }
+
+    const body = await request.json().catch(() => ({}));
+    const handle = parseHandle(body.input);
+    if (!handle) {
+      return json({ error: "that doesn't look like an X handle or link", code: 'badinput' }, 400);
+    }
+
+    if (await isBlocked(env, handle)) {
+      return json({ error: 'this account asked to be removed from the tool', code: 'blocked' }, 403);
+    }
+
+    if (await overDailyCap(env)) {
+      return json({ error: 'the robots are resting — daily limit reached, try again tomorrow', code: 'cap' }, 429);
+    }
+
+    // Resolve the account.
+    let user;
+    try {
+      user = await getUser(env, handle);
+    } catch (err) {
+      if (err.code === 'notfound')
+        return json({ error: `can't find @${handle} on X`, code: 'notfound' }, 404);
+      return json({ error: 'the post source is having a moment — try again in a sec', code: 'upstream' }, 502);
+    }
+    if (user.protected) {
+      return json({ error: `@${user.handle}'s posts are protected`, code: 'protected', handle: user.handle }, 422);
+    }
+
+    // Pull and clean recent posts.
+    let samples, counts;
+    try {
+      ({ samples, counts } = await getSamples(env, user.handle, {
+        maxTweets: SAMPLE_TWEETS,
+        targetWords: Infinity, // exactly SAMPLE_TWEETS posts, not a word budget
+        excludeReplies: true,
+        minWordsPerTweet: DROP_K + 1, // every sampled post survives the drop
+        maxPages: 6, // reply-heavy / short-post timelines need a deeper scan
+      }));
+    } catch (err) {
+      return json({ error: 'the post source is having a moment — try again in a sec', code: 'upstream' }, 502);
+    }
+    if (samples.length < MIN_SAMPLE_TWEETS || counts.words < MIN_SAMPLE_WORDS) {
+      return json(
+        { error: `not enough public posts to grade @${user.handle} fairly`, code: 'thin', handle: user.handle, kept: samples.length },
+        422
+      );
+    }
+
+    // Score every (post × model) walk with bounded concurrency.
+    const jobs = [];
+    for (const t of samples) for (const m of MODELS) jobs.push({ t, m });
+    const scored = await pMap(jobs, async ({ t, m }) => ({ t, m, r: await scoreText(env, m, t.text) }), 8);
+
+    // Reconcile the usage counter with the real number of model walks done
+    // (overDailyCap already charged 1 above).
+    ctx?.waitUntil?.(addUsage(env, jobs.length - 1));
+
+    // Aggregate per model: token-weighted mean surprisal over its posts, with
+    // the first DROP_K tokens of each post dropped (cold-start tokens are
+    // unpredictable for everyone and drown the AI↔human signal).
+    const byId = {}; // tweetId -> modelId -> result
+    for (const { t, m, r } of scored) {
+      if (!r) continue;
+      (byId[t.id] ||= {})[m.id] = r;
+    }
+    const perModel = MODELS.map((m) => {
+      let sumSurpr = 0, sumTok = 0, posts = 0;
+      for (const t of samples) {
+        const r = byId[t.id]?.[m.id];
+        if (!r || !r.perStep?.length) continue;
+        const kept = r.perStep.slice(DROP_K);
+        if (!kept.length) continue;
+        sumSurpr += -kept.reduce((s, p) => s + p.logprob, 0);
+        sumTok += kept.length;
+        posts++;
+      }
+      if (!posts || !sumTok) return null;
+      const avgKL = sumSurpr / sumTok;
+      return {
+        model: m.id,
+        label: m.label,
+        maker: m.maker,
+        avgKL: Math.round(avgKL * 1000) / 1000,
+        score: clankerScoreText(avgKL, m.d0text),
+        posts,
+      };
+    }).filter(Boolean);
+
+    if (!perModel.length) {
+      return json({ error: 'scoring failed — try again in a sec', code: 'upstream' }, 502);
+    }
+
+    // Nearest (least-surprised) model sets the number, same as the self-test.
+    const overall = Math.max(...perModel.map((m) => m.score));
+    const grid = buildDiagnoseGrid(samples, byId, user.handle);
+    const sources = samples.map((t) => ({ id: t.id, text: t.text }));
+
+    const id = crypto.randomUUID();
+    await env.DB.prepare(
+      `INSERT INTO results (id, created_at, overall, per_model, grid, subject_type, subject_handle, subject_name, sources)
+       VALUES (?, ?, ?, ?, ?, 'account', ?, ?, ?)`
+    )
+      .bind(
+        id,
+        Date.now(),
+        overall,
+        JSON.stringify(perModel),
+        JSON.stringify(grid),
+        user.handle,
+        user.name,
+        JSON.stringify(sources)
+      )
+      .run();
+
+    return json({
+      id,
+      overall,
+      perModel,
+      grid,
+      sources,
+      percentile: await percentile(env, overall, 'account'),
+      subject: {
+        type: 'account',
+        handle: user.handle,
+        name: user.name,
+        followers: user.followers,
+        fetched: counts.fetched,
+        kept: counts.kept,
+        words: counts.words,
+      },
+    });
+  }
+
+  // Opt-out: remove an account from the tool. Blocks future diagnoses and
+  // deletes stored results for that handle. Intentionally open (no auth) so the
+  // subject themselves can trigger it from a result page.
+  if (request.method === 'POST' && pathname === '/api/remove') {
+    const body = await request.json().catch(() => ({}));
+    const handle = parseHandle(body.handle);
+    if (!handle) return json({ error: 'bad handle', code: 'badinput' }, 400);
+    const lc = handle.toLowerCase();
+    try {
+      await env.DB.prepare('INSERT OR IGNORE INTO blocklist (handle, created_at) VALUES (?, ?)')
+        .bind(lc, Date.now())
+        .run();
+      await env.DB.prepare(
+        "DELETE FROM results WHERE subject_type = 'account' AND lower(subject_handle) = ?"
+      )
+        .bind(lc)
+        .run();
+    } catch (err) {
+      return json({ error: 'could not remove — try again', code: 'upstream' }, 500);
+    }
+    logEvent(env, ctx, request, 'optout', { meta: lc });
+    return json({ ok: true });
   }
 
   if (request.method === 'GET' && pathname.startsWith('/api/result/')) {
     const id = pathname.slice('/api/result/'.length);
     const row = await env.DB.prepare('SELECT * FROM results WHERE id = ?').bind(id).first();
     if (!row) return json({ error: 'not found' }, 404);
-    return json({
+    const out = {
       id,
       overall: row.overall,
       perModel: JSON.parse(row.per_model),
       grid: row.grid ? JSON.parse(row.grid) : null,
-      percentile: await percentile(env, row.overall),
-    });
+      percentile: await percentile(env, row.overall, row.subject_type === 'account' ? 'account' : 'self'),
+    };
+    if (row.subject_type === 'account') {
+      out.subject = {
+        type: 'account',
+        handle: row.subject_handle,
+        name: row.subject_name,
+        kept: row.grid ? JSON.parse(row.grid).length : null,
+      };
+      out.sources = row.sources ? JSON.parse(row.sources) : [];
+    }
+    return json(out);
   }
 
   return json({ error: 'not found' }, 404);
@@ -353,33 +564,101 @@ function buildGrid(rows) {
   return grid;
 }
 
-// Atomically bump today's scoring-call counter and report whether the global
-// daily cap is exceeded. Fail-open: any error returns false so scoring survives
-// a counter glitch. DAILY_CALL_CAP=0 (or unset default) disables the cap.
-async function overDailyCap(env) {
-  const cap = Number(env.DAILY_CALL_CAP ?? 0);
-  if (!cap) return false;
+// Build the account share grid: one row per sampled post, one cell per word,
+// colored by the word's surprisal averaged across models. Same shape as
+// buildGrid, but rows are posts (prompt is the @handle, answer is the post).
+function buildDiagnoseGrid(samples, byId, handle) {
+  const grid = [];
+  for (const t of samples) {
+    const perModel = byId[t.id];
+    if (!perModel) continue;
+    const words = String(t.text).trim().split(/\s+/);
+    const pws = MODELS.map((m) => perModel[m.id]?.perWord || []);
+    const cells = words.map((_, i) => {
+      const vals = pws.map((pw) => pw[i]).filter((v) => v != null);
+      if (!vals.length) return null;
+      return heatLevel(vals.reduce((a, b) => a + b, 0) / vals.length);
+    });
+    // Per-post surprisal (mean model avgKL) so the share page can rank
+    // most- vs least-clanker posts.
+    const kls = MODELS.map((m) => perModel[m.id]?.avgKL).filter((v) => v != null);
+    const kl = kls.length ? Math.round((kls.reduce((a, b) => a + b, 0) / kls.length) * 100) / 100 : null;
+    grid.push({ prompt: `@${handle}`, answer: words.join(' '), cells, kl });
+  }
+  return grid;
+}
+
+// Run async `fn` over `items` with at most `concurrency` in flight. Keeps the
+// diagnose fan-out (posts × models, each a multi-call walk) from bursting the
+// upstream provider or the Worker subrequest budget.
+async function pMap(items, fn, concurrency = 8) {
+  const out = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
+// Add `n` to today's global call counter, returning the new total (or null on
+// error). Fail-open everywhere: a counter glitch must never take scoring down.
+async function addUsage(env, n) {
+  if (!n) return null;
   try {
     const day = new Date().toISOString().slice(0, 10);
     const row = await env.DB.prepare(
-      `INSERT INTO usage (day, calls) VALUES (?, 1)
-       ON CONFLICT(day) DO UPDATE SET calls = calls + 1
+      `INSERT INTO usage (day, calls) VALUES (?, ?)
+       ON CONFLICT(day) DO UPDATE SET calls = calls + ?
        RETURNING calls`
     )
-      .bind(day)
+      .bind(day, n, n)
       .first();
-    return (row?.calls ?? 0) > cap;
+    return row?.calls ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// Whether a handle has opted out. Fail-open (treat errors as not-blocked) so a
+// DB hiccup never wrongly refuses; the blocklist is a courtesy, not a security
+// control.
+async function isBlocked(env, handle) {
+  try {
+    const row = await env.DB.prepare('SELECT 1 FROM blocklist WHERE handle = ?')
+      .bind(handle.toLowerCase())
+      .first();
+    return !!row;
   } catch {
     return false;
   }
 }
 
-// Share of other finished runs strictly less clanker than this score.
-async function percentile(env, overall) {
-  const { total } = await env.DB.prepare('SELECT COUNT(*) AS total FROM results').first();
+// Bump today's counter by 1 and report whether the global daily cap is now
+// exceeded. DAILY_CALL_CAP=0 (or unset) disables the cap.
+async function overDailyCap(env) {
+  const cap = Number(env.DAILY_CALL_CAP ?? 0);
+  if (!cap) return false;
+  const calls = await addUsage(env, 1);
+  return calls != null && calls > cap;
+}
+
+// Share of other finished runs strictly less clanker than this score, compared
+// within the same population: self-tests rank against humans, diagnosed
+// accounts against accounts (the result copy names the population).
+async function percentile(env, overall, subjectType = 'self') {
+  const cond =
+    subjectType === 'account'
+      ? `subject_type = 'account'`
+      : `(subject_type IS NULL OR subject_type = 'self')`;
+  const { total } = await env.DB.prepare(`SELECT COUNT(*) AS total FROM results WHERE ${cond}`).first();
   if (total <= 1) return null;
   const { below } = await env.DB.prepare(
-    'SELECT COUNT(*) AS below FROM results WHERE overall < ?'
+    `SELECT COUNT(*) AS below FROM results WHERE ${cond} AND overall < ?`
   )
     .bind(overall)
     .first();

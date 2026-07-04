@@ -17,13 +17,20 @@ CREATE TABLE IF NOT EXISTS answers (
   PRIMARY KEY (session_id, question_id, model)
 );
 
--- Finished runs; percentile is computed against this table.
+-- Finished runs; percentile is computed against this table. A row is either a
+-- self-test (subject_type NULL/'self') or an X-account diagnosis
+-- (subject_type='account', with subject_handle/name and sources = JSON of the
+-- sampled posts). Older rows predate these columns, so they're all nullable.
 CREATE TABLE IF NOT EXISTS results (
   id TEXT PRIMARY KEY,
   created_at INTEGER NOT NULL,
   overall REAL NOT NULL,
   per_model TEXT NOT NULL,
-  grid TEXT
+  grid TEXT,
+  subject_type TEXT,
+  subject_handle TEXT,
+  subject_name TEXT,
+  sources TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_results_overall ON results(overall);
@@ -32,6 +39,13 @@ CREATE INDEX IF NOT EXISTS idx_results_overall ON results(overall);
 CREATE TABLE IF NOT EXISTS usage (
   day TEXT PRIMARY KEY,
   calls INTEGER NOT NULL
+);
+
+-- Opt-out list for the "diagnose an X account" feature. A handle here can't be
+-- diagnosed and its stored results are deleted. Handles are stored lowercased.
+CREATE TABLE IF NOT EXISTS blocklist (
+  handle TEXT PRIMARY KEY,
+  created_at INTEGER NOT NULL
 );
 
 -- Admin OAuth sessions for analytics.howclankerareyou.com.

@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const VIEWS = ['landing', 'quiz', 'scoring', 'results'];
+const VIEWS = ['landing', 'gather', 'quiz', 'scoring', 'results'];
 const show = (v) => VIEWS.forEach((x) => ($(`view-${x}`).hidden = x !== v));
 
 const state = {
@@ -11,6 +11,7 @@ const state = {
   promises: [],
   done: 0,
   total: 0,
+  gatherTimers: [],
 };
 
 async function api(path, body) {
@@ -21,27 +22,147 @@ async function api(path, body) {
       : undefined
   );
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || res.statusText);
+  if (!res.ok) {
+    const err = new Error(data.error || res.statusText);
+    err.code = data.code;
+    err.status = res.status;
+    throw err;
+  }
   return data;
 }
 
-// --- landing ---------------------------------------------------------------
+// --- landing: diagnose an X account ----------------------------------------
 
-$('btn-start').addEventListener('click', async () => {
-  const btn = $('btn-start');
+$('diag-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  runDiagnose();
+});
+$('link-self').addEventListener('click', (e) => {
+  e.preventDefault();
+  startSelfTest();
+});
+
+async function runDiagnose() {
+  const input = $('diag-input').value.trim();
+  const errEl = $('diag-err');
+  errEl.hidden = true;
+  if (!input) {
+    errEl.textContent = 'enter an @handle or an X link.';
+    errEl.hidden = false;
+    return;
+  }
+  const btn = $('btn-diagnose');
   btn.disabled = true;
-  btn.textContent = 'booting…';
+  showGather(guessHandle(input));
+  try {
+    const d = await api('/api/diagnose', { input });
+    stopGather();
+    renderResults(d, true);
+  } catch (err) {
+    stopGather();
+    btn.disabled = false;
+    show('landing');
+    errEl.textContent = diagnoseErrorText(err);
+    errEl.hidden = false;
+    $('diag-input').focus();
+  }
+}
+
+// Best-effort handle for the gathering screen before the server confirms it.
+function guessHandle(input) {
+  const m = input.match(/(?:x\.com|twitter\.com)\/@?([A-Za-z0-9_]{1,15})/i);
+  if (m) return m[1];
+  return input.replace(/^@/, '').replace(/[^A-Za-z0-9_].*$/, '').slice(0, 15) || 'them';
+}
+
+function diagnoseErrorText(err) {
+  switch (err.code) {
+    case 'badinput':
+      return "that doesn't look like an X handle or link — try @handle.";
+    case 'notfound':
+      return err.message + ' — check the spelling, or paste their profile link.';
+    case 'protected':
+      return err.message + ' — this account is private, so we can’t read it. try a public one.';
+    case 'thin':
+      return err.message + ' — we need 5 recent original posts. try someone more active.';
+    case 'blocked':
+      return 'this account asked to be removed from the tool.';
+    case 'ratelimited':
+      return err.message + '.';
+    case 'cap':
+      return err.message + '.';
+    default:
+      return err.message || 'something went wrong — try again in a sec.';
+  }
+}
+
+// Gathering screen: no per-step server feedback (it's one request), so the
+// scan check-offs and bar are optimistic timers, cleaned up when the call
+// resolves.
+function showGather(handle) {
+  $('gather-tag').textContent = `// diagnosing @${handle}`;
+  $('gather-head').textContent = `pulling @${handle}'s recent posts…`;
+  const scan = $('gather-scan').children;
+  scan[0].className = 'wait';
+  scan[0].textContent = '⋯ finding the account on X';
+  scan[1].className = 'wait';
+  scan[1].textContent = '⋯ pulling their 5 most recent posts (retweets & replies excluded)';
+  scan[2].className = 'wait';
+  scan[2].textContent = '⋯ scoring word-by-word vs Llama · DeepSeek · Qwen3';
+  const fill = $('gather-fill');
+  fill.style.width = '5%';
+  show('gather');
+  stopGather();
+  // A diagnosis is one long request (~60–120s: 15 token-walks upstream), so
+  // the check-offs are optimistic timers and the bar creeps asymptotically
+  // toward 92% until the response lands.
+  let pct = 5;
+  state.gatherTimers.push(
+    setTimeout(() => {
+      scan[0].className = 'ok';
+      scan[0].textContent = `✓ found @${handle}`;
+      fill.style.width = `${(pct = 12)}%`;
+    }, 1200),
+    setTimeout(() => {
+      scan[1].className = 'ok';
+      scan[1].textContent = '✓ pulled their 5 most recent posts (retweets & replies excluded)';
+      fill.style.width = `${(pct = 22)}%`;
+    }, 6000),
+    setInterval(() => {
+      pct = Math.min(92, pct + (92 - pct) * 0.035);
+      fill.style.width = `${pct}%`;
+    }, 1000)
+  );
+}
+function stopGather() {
+  state.gatherTimers.forEach((t) => {
+    clearTimeout(t);
+    clearInterval(t);
+  });
+  state.gatherTimers = [];
+}
+
+// --- self-test (secondary path) --------------------------------------------
+
+async function startSelfTest() {
+  const link = $('link-self');
+  const old = link.textContent;
+  link.textContent = 'booting…';
   try {
     const d = await api('/api/session', {});
-    Object.assign(state, { session: d.session, questions: d.questions, models: d.models, idx: 0 });
+    Object.assign(state, { session: d.session, questions: d.questions, models: d.models, idx: 0, results: {}, promises: [], done: 0, total: 0 });
     if (d.mock) $('method-demo').hidden = false;
     show('quiz');
     renderQuestion();
   } catch (err) {
-    btn.textContent = `failed: ${err.message} — retry?`;
-    btn.disabled = false;
+    link.textContent = old;
+    const errEl = $('diag-err');
+    errEl.textContent = `couldn't start: ${err.message}`;
+    errEl.hidden = false;
+  } finally {
+    link.textContent = old;
   }
-});
+}
 
 // --- quiz ------------------------------------------------------------------
 
@@ -122,20 +243,51 @@ const VERDICTS = [
   [15, 'mostly human. trace amounts of clanker.'],
   [0, 'certified organic. unpredictable in ways no lab can reproduce.'],
 ];
+const ACCOUNT_VERDICTS = [
+  [85, 'heavy clanker energy. tweets like a press release wrote itself.'],
+  [60, 'a lot of clanker in the timeline. the algorithm approves.'],
+  [35, 'some synthetic residue, but a pulse is detectable.'],
+  [15, 'mostly human. trace amounts of clanker.'],
+  [0, 'certified organic. posts no model saw coming.'],
+];
 
 function renderResults(fin, live) {
   show('results');
-  $('res-context').textContent = live ? '' : 'someone shared this result with you.';
-  $('res-score').textContent = `${fin.overall}%`;
-  $('res-verdict').textContent = VERDICTS.find(([min]) => fin.overall >= min)[1];
-  $('res-percentile').textContent =
-    fin.percentile == null
-      ? 'you are the first specimen. percentile pending more humans.'
-      : `more clanker than ${fin.percentile}% of humans tested.`;
+  const acct = fin.subject && fin.subject.type === 'account';
+  const handle = acct ? fin.subject.handle : null;
 
+  const url = fin.id ? `${location.origin}/r/${fin.id}` : location.origin;
+
+  // Headline.
+  if (acct) {
+    const kept = fin.subject.kept || (fin.grid ? fin.grid.length : null);
+    $('res-context').innerHTML = kept
+      ? `graded from ${kept} public posts on X · <a href="https://x.com/${esc(handle)}" target="_blank" rel="noopener" style="color:var(--accent)">@${esc(handle)}</a>`
+      : `graded from public posts on X · @${esc(handle)}`;
+    $('res-score').textContent = `${fin.overall}%`;
+    $('res-score').previousSibling.textContent = `@${handle} is `;
+    $('res-verdict').textContent = ACCOUNT_VERDICTS.find(([min]) => fin.overall >= min)[1];
+    $('res-percentile').textContent =
+      fin.percentile == null
+        ? 'the first specimen. percentile pending more accounts.'
+        : `more clanker than ${fin.percentile}% of accounts graded.`;
+  } else {
+    $('res-context').textContent = live ? '' : 'someone shared this result with you.';
+    // Reset the "you are ___ clanker" prefix in case it was overwritten.
+    $('res-score').previousSibling.textContent = 'you are ';
+    $('res-score').textContent = `${fin.overall}%`;
+    $('res-verdict').textContent = VERDICTS.find(([min]) => fin.overall >= min)[1];
+    $('res-percentile').textContent =
+      fin.percentile == null
+        ? 'you are the first specimen. percentile pending more humans.'
+        : `more clanker than ${fin.percentile}% of humans tested.`;
+  }
+
+  // Model similarity bars.
   const sorted = [...fin.perModel].sort((a, b) => b.score - a.score);
+  const lead = acct ? 'closest model' : 'your inner clanker';
   $('res-models').innerHTML =
-    `<p class="fine">your inner clanker: <span class="accent">${esc(sorted[0].label)}</span> — similarity by model:</p>` +
+    `<p class="fine">${lead}: <span class="accent">${esc(sorted[0].label)}</span> — similarity by model:</p>` +
     sorted
       .map(
         (m) => `
@@ -149,51 +301,106 @@ function renderResults(fin, live) {
       )
       .join('');
 
-  $('res-details').innerHTML = renderDetails(fin.grid);
+  $('res-details').innerHTML = renderDetails(fin.grid, acct);
 
-  // Heat grid + Wordle-style share.
+  // Sampled posts (accounts only).
+  if (acct && fin.sources && fin.sources.length) {
+    $('res-sources').innerHTML =
+      `<h2 class="section">posts sampled — ${fin.sources.length}</h2>` +
+      fin.sources
+        .map(
+          (s) =>
+            `<div class="src"><span class="badge">@${esc(handle)}</span><span>${esc(s.text)}</span></div>`
+        )
+        .join('');
+  } else {
+    $('res-sources').innerHTML = '';
+  }
+
+  // Heat grid.
   const grid = fin.grid;
-  const url = fin.id ? `${location.origin}/r/${fin.id}` : location.origin;
   if (grid && grid.length) {
     $('res-grid').innerHTML = grid
       .map(
         (row) =>
-          `<div class="grid-row" title="${esc(row.prompt + ' ' + row.answer)}">` +
-          row.cells
-            .map((c) => `<span class="cell l${c == null ? 'x' : c}"></span>`)
-            .join('') +
+          `<div class="grid-row" title="${esc(row.answer)}">` +
+          row.cells.map((c) => `<span class="cell l${c == null ? 'x' : c}"></span>`).join('') +
           `</div>`
       )
       .join('');
+    $('grid-legend').innerHTML = acct
+      ? 'one square per sampled word · <span class="good">green</span> = human · <span class="accent">red</span> = clanker'
+      : 'one square per word · <span class="good">green</span> = human · <span class="accent">red</span> = clanker';
     $('grid-legend').hidden = false;
+  } else {
+    $('res-grid').innerHTML = '';
+    $('grid-legend').hidden = true;
   }
 
-  // Two audiences, two CTAs. The person who just took the test gets share (the
-  // primary action) + copy-link, with "run it again" as a secondary. Someone
-  // who opened a shared link gets neither — just "take the test" as the CTA.
+  wireResultButtons(fin, grid, url, live, acct);
+}
+
+function wireResultButtons(fin, grid, url, live, acct) {
   const share = $('btn-share');
   const link = $('btn-link');
   const take = $('btn-take');
   const again = $('btn-again');
-  if (live) {
-    // Taker: share is the primary action; "take it again" is their retake,
-    // sitting at the very bottom after the deeper stats.
-    if (grid && grid.length) {
+  const diagAgain = $('btn-diag-again');
+  const selfInstead = $('btn-self-instead');
+  const optout = $('res-optout');
+  // Reset all.
+  for (const b of [share, link, take, again, diagAgain, selfInstead]) b.hidden = true;
+  optout.hidden = true;
+
+  const hasGrid = grid && grid.length;
+
+  if (acct) {
+    // Account result: share the finding, then diagnose someone else / take the
+    // test yourself. Opt-out is always offered.
+    if (live && hasGrid) {
       share.hidden = false;
-      share.onclick = () => shareResult(fin, grid, url);
+      share.onclick = () => shareResult(fin, grid, url, acct);
       link.hidden = false;
-      link.onclick = () =>
-        navigator.clipboard.writeText(url).then(() => flash(link, 'link copied'));
+      link.onclick = () => navigator.clipboard.writeText(url).then(() => flash(link, 'link copied'));
+    }
+    diagAgain.hidden = false;
+    diagAgain.onclick = () => (location.href = '/');
+    selfInstead.hidden = false;
+    selfInstead.onclick = () => (location.href = '/#self');
+    optout.hidden = false;
+    $('link-optout').onclick = (e) => {
+      e.preventDefault();
+      optoutHandle(fin.subject.handle);
+    };
+    return;
+  }
+
+  // Self-test result.
+  if (live) {
+    if (hasGrid) {
+      share.hidden = false;
+      share.onclick = () => shareResult(fin, grid, url, acct);
+      link.hidden = false;
+      link.onclick = () => navigator.clipboard.writeText(url).then(() => flash(link, 'link copied'));
     }
     again.hidden = false;
     again.classList.remove('big');
     again.textContent = 'take it again';
-    again.onclick = () => (location.href = '/');
+    again.onclick = () => (location.href = '/#self');
   } else {
-    // Recipient of a shared link already has "take the test" up top — no
-    // bottom button (and "again" would be wrong; they haven't taken it).
     take.hidden = false;
     take.onclick = () => (location.href = '/');
+  }
+}
+
+async function optoutHandle(handle) {
+  if (!confirm(`Remove @${handle} from this tool? This deletes the result and blocks future diagnoses of this account.`))
+    return;
+  try {
+    await api('/api/remove', { handle });
+    $('res-optout').innerHTML = 'removed — this account can no longer be diagnosed here.';
+  } catch (err) {
+    flash($('link-optout'), 'failed, try again');
   }
 }
 
@@ -201,13 +408,15 @@ const EMOJI = ['🟥', '🟧', '🟨', '🟩']; // 0 clanker → 3 human
 const gridToEmoji = (grid) =>
   grid.map((row) => row.cells.map((c) => (c == null ? '⬜' : EMOJI[c])).join('')).join('\n');
 
-function shareText(fin, grid, url) {
-  return `how clanker are you? — ${fin.overall}% clanker 🤖\n\n${gridToEmoji(grid)}\n\n${url}`;
+function shareText(fin, grid, url, acct) {
+  const head = acct
+    ? `@${fin.subject.handle} is ${fin.overall}% clanker 🤖 — how clanker are you?`
+    : `how clanker are you? — ${fin.overall}% clanker 🤖`;
+  return `${head}\n\n${gridToEmoji(grid)}\n\n${url}`;
 }
 
-async function shareResult(fin, grid, url) {
-  const text = shareText(fin, grid, url);
-  // Fire-and-forget analytics beacon for the share tap.
+async function shareResult(fin, grid, url, acct) {
+  const text = shareText(fin, grid, url, acct);
   try {
     fetch('/api/event', {
       method: 'POST',
@@ -216,22 +425,15 @@ async function shareResult(fin, grid, url) {
       keepalive: true,
     });
   } catch {}
-  // Prefer the native share sheet on touch devices (feature-detected, not UA
-  // sniffed). The whole payload — headline + emoji grid + link — goes in `text`
-  // so it survives every target; iMessage still auto-previews the URL below it.
-  // navigator.share() must run in the click's transient activation, so nothing
-  // async happens before it.
   const canShare =
-    typeof navigator.share === 'function' &&
-    (!navigator.canShare || navigator.canShare({ text }));
+    typeof navigator.share === 'function' && (!navigator.canShare || navigator.canShare({ text }));
   const touch = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
   if (canShare && touch) {
     try {
       await navigator.share({ text });
       return;
     } catch (err) {
-      if (err && err.name === 'AbortError') return; // user dismissed the sheet
-      // any other error: fall through to clipboard
+      if (err && err.name === 'AbortError') return;
     }
   }
   try {
@@ -248,19 +450,26 @@ function flash(btn, msg) {
   setTimeout(() => (btn.textContent = old), 1800);
 }
 
-// Most / least clanker answer, derived from the server grid so it renders on
-// shared pages too. Lowest per-question surprisal = most clanker.
-function renderDetails(grid) {
+// Most / least clanker item, derived from the server grid so it renders on
+// shared pages too. Lowest per-item surprisal = most clanker.
+function renderDetails(grid, acct) {
   const rows = (grid || []).filter((r) => typeof r.kl === 'number' && r.answer);
   if (rows.length < 2) return '';
   const sorted = [...rows].sort((a, b) => a.kl - b.kl);
   const most = sorted[0];
   const least = sorted[sorted.length - 1];
+  const noun = acct ? 'post' : 'answer';
+  const body = (r, cls) =>
+    acct
+      ? `<p><span class="${cls}">${esc(r.answer)}</span></p>`
+      : `<p>${esc(r.prompt)} <span class="${cls}">${esc(r.answer)}</span></p>`;
   return (
-    `<div class="detail"><p class="q">most clanker answer (${most.kl.toFixed(1)} nats surprisal)</p>` +
-    `<p>${esc(most.prompt)} <span class="accent">${esc(most.answer)}</span></p></div>` +
-    `<div class="detail"><p class="q">least clanker answer (${least.kl.toFixed(1)} nats surprisal)</p>` +
-    `<p>${esc(least.prompt)} <span class="good">${esc(least.answer)}</span></p></div>`
+    `<div class="detail"><p class="q">most clanker ${noun} (${most.kl.toFixed(1)} nats surprisal)</p>` +
+    body(most, 'accent') +
+    `</div>` +
+    `<div class="detail"><p class="q">least clanker ${noun} (${least.kl.toFixed(1)} nats surprisal)</p>` +
+    body(least, 'good') +
+    `</div>`
   );
 }
 
@@ -286,4 +495,6 @@ if (shared) {
     .catch(() => show('landing'));
 } else {
   show('landing');
+  // Deep-link to the self-test (from "take it again" / "take the test yourself").
+  if (location.hash === '#self') startSelfTest();
 }

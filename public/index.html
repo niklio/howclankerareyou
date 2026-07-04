@@ -55,15 +55,31 @@
   <main id="app">
     <section id="view-landing" hidden>
       <h1 class="title">how clanker<br>are you?</h1>
-      <p class="sub">// a surprisal Turing test, reversed.</p>
-      <p>Language models predict the next token. You, allegedly, do something
-      more interesting. Finish five sentences; we measure how surprising your
-      writing is to the machines.</p>
-      <p><span class="accent">low surprisal</span> = the model saw you coming.
-      <span class="good">high surprisal</span> = congratulations, human.</p>
-      <button id="btn-start" class="big">begin diagnostic ▶</button>
+      <p class="sub">// a surprisal Turing test</p>
+      <p>Drop an <span class="accent">@handle</span> (or paste an X link) — we pull
+      their recent posts and grade how clanker (AI-like) they write. Language models
+      predict the next token; the more predictable the writing, the more clanker.</p>
+      <form class="searchbar" id="diag-form">
+        <input id="diag-input" type="text" autocomplete="off" autocapitalize="off"
+               spellcheck="false" placeholder="@handle or paste an X link…">
+        <button id="btn-diagnose" type="submit">diagnose ▶</button>
+      </form>
+      <p class="err" id="diag-err" hidden></p>
+      <p class="secondary">→ or <a id="link-self" href="#">diagnose yourself</a> — finish 5 sentences</p>
       <p class="demo" id="demo-note" hidden>⚠ demo mode: inference isn't funded
       yet — scores come from a deterministic stand-in, not the real models.</p>
+    </section>
+
+    <section id="view-gather" hidden>
+      <div class="tag" id="gather-tag">// diagnosing</div>
+      <h2 id="gather-head">pulling recent posts…</h2>
+      <ul class="scan" id="gather-scan">
+        <li class="wait">⋯ finding the account on X</li>
+        <li class="wait">⋯ pulling their 5 most recent posts (retweets &amp; replies excluded)</li>
+        <li class="wait">⋯ scoring word-by-word vs Llama · DeepSeek · Qwen3</li>
+      </ul>
+      <div class="scorebar"><div id="gather-fill"></div></div>
+      <p class="fine">~a minute or two — we walk their posts token by token, and the models don't rush</p>
     </section>
 
     <section id="view-quiz" hidden>
@@ -98,8 +114,13 @@
       <h2 class="section">deeper stats</h2>
       <div id="res-models"></div>
       <div id="res-details"></div>
+      <div id="res-sources"></div>
+      <p class="fine" id="res-optout" hidden>for fun, from public posts — not a judgment of the person.
+        <a href="#" id="link-optout">remove me</a></p>
       <div class="row">
         <button id="btn-again" hidden>run it again</button>
+        <button id="btn-diag-again" class="big" hidden>diagnose someone else ▶</button>
+        <button id="btn-self-instead" hidden>take the test yourself</button>
       </div>
       <p class="fine" id="res-method">method: each word you typed is scored by its surprisal under each
       model — −log p<sub>model</sub>(word), from the model's top-20 next-token probabilities
