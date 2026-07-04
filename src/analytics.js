@@ -219,6 +219,15 @@ export async function gatherAnalytics(env, range = 'week') {
   const ctaRows = await q(`SELECT meta, COUNT(*) n FROM events WHERE type='cta' GROUP BY meta`);
   const cta = Object.fromEntries(ctaRows.map((r) => [r.meta, r.n]));
 
+  // Live feed: the most recent account diagnoses (fresh results only — cache
+  // hits don't create rows, so this is genuinely "new grades").
+  const recentAccounts = (
+    await q(
+      `SELECT subject_handle h, overall, created_at t FROM results
+       WHERE ${ACCT_COND} ORDER BY created_at DESC LIMIT 15`
+    )
+  ).map((r) => ({ handle: r.h, overall: r.overall, at: r.t }));
+
   // --- budget (operational: today's cap + month-to-date, range-independent) ---
   const monthStart = today().slice(0, 8) + '01';
   const mtdCallsRow = await q(`SELECT SUM(steps) n FROM answers a JOIN sessions s ON a.session_id=s.id WHERE ${dayExpr('s.created_at')} >= '${monthStart}'`);
@@ -280,6 +289,7 @@ export async function gatherAnalytics(env, range = 'week') {
     funnel,
     scoreHistogram: hist,
     outcomes: outcomeRows.map((r) => ({ outcome: r.o || 'unknown', count: r.n })),
+    recentAccounts,
     topHandles,
     cta,
     modelShare,
