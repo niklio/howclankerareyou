@@ -34,6 +34,9 @@ CREATE TABLE IF NOT EXISTS results (
 );
 
 CREATE INDEX IF NOT EXISTS idx_results_overall ON results(overall);
+-- Diagnose cache lookup: latest result for a handle within the TTL window.
+CREATE INDEX IF NOT EXISTS idx_results_subject
+  ON results(subject_type, subject_handle, created_at);
 
 -- Global daily scoring-call counter (abuse backstop). One row per UTC day.
 CREATE TABLE IF NOT EXISTS usage (

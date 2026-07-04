@@ -12,23 +12,12 @@ const RESERVED = new Set([
   'i', 'compose', 'hashtag', 'intent', 'share', 'login', 'signup',
 ]);
 
-// Accept "@handle", "handle", or an x.com / twitter.com profile or status URL.
-// X handles are 1–15 chars of [A-Za-z0-9_]. Returns the bare handle (original
-// case preserved for display; the API is case-insensitive) or null if the input
-// isn't a plausible handle.
+// Accept "@handle" or "handle" only — no URLs. X handles are 1–15 chars of
+// [A-Za-z0-9_]. Returns the bare handle (original case preserved for display;
+// the API is case-insensitive) or null if the input isn't a plausible handle.
 export function parseHandle(input) {
   if (!input) return null;
-  const s = String(input).trim();
-
-  const urlMatch = s.match(
-    /^(?:https?:\/\/)?(?:www\.|mobile\.)?(?:x\.com|twitter\.com)\/(?:#!\/)?@?([A-Za-z0-9_]{1,15})(?:[/?#]|$)/i
-  );
-  if (urlMatch) {
-    const h = urlMatch[1];
-    return RESERVED.has(h.toLowerCase()) ? null : h;
-  }
-
-  const bare = s.replace(/^@/, '');
+  const bare = String(input).trim().replace(/^@/, '');
   if (/^[A-Za-z0-9_]{1,15}$/.test(bare) && !RESERVED.has(bare.toLowerCase())) return bare;
   return null;
 }
@@ -58,12 +47,13 @@ async function api(env, path, params, retries = 4) {
       // next_cursor }. Throttle/error shape: { error, message }.
       if (!throttled && data && (data.status === 'success' || data.data)) return data;
       lastErr = new Error(data?.message || data?.msg || `twitterapi ${res.status}`);
-      // 402 = out of credits, 401/403 = bad key. Retrying can't fix these;
-      // bail so the user gets a fast error instead of a 10s retry dance.
-      if ([401, 402, 403].includes(res.status)) throw lastErr;
+      // Definitive answers aren't transient — don't burn retries on them:
+      // status:'error' = the API resolved the request (e.g. "user not found");
+      // 402 = out of credits, 401/403 = bad key.
+      if (data?.status === 'error' || [401, 402, 403].includes(res.status)) throw lastErr;
     } catch (err) {
       lastErr = err;
-      if (/credits|unauthorized/i.test(String(err.message))) throw err;
+      if (/not found|credits|unauthorized/i.test(String(err.message))) throw err;
     }
     if (attempt < retries) await sleep(throttled ? 1800 + 700 * attempt : 500 * (attempt + 1));
   }
@@ -84,9 +74,11 @@ export async function getUser(env, handle) {
   try {
     data = await api(env, '/twitter/user/info', { userName: handle });
   } catch (err) {
+    // The API answers "user not found" as status:'error' (api() rethrows it
+    // without retrying); anything else is the scraper flaking.
+    if (/not found/i.test(String(err.message))) throw fail('notfound', 'account not found');
     throw fail('upstream', 'post source unavailable');
   }
-  // A real miss comes back as a success-shaped payload with no user in it.
   const u = data.data || data;
   if (!u || !u.userName) throw fail('notfound', 'account not found');
   return {

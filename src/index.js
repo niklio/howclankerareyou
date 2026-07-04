@@ -7,6 +7,7 @@ import {
   clankerScoreText,
   isMock,
   heatLevel,
+  heatLevelText,
 } from './scoring.js';
 import { parseHandle, getUser, getSamples } from './twitter.js';
 import * as auth from './auth.js';
@@ -20,18 +21,25 @@ const COOKIE_DOMAIN = '.howclankerareyou.com';
 const SESSION_COOKIE = 'hcay_session';
 
 // --- diagnose tuning --------------------------------------------------------
-// Sample = the 5 most recent standalone posts (no retweets, no replies) LONG
-// ENOUGH to survive the drop: each post must have > DROP_K words. Drop each
-// post's first DROP_K scored tokens before averaging: with no shared stem, the
-// opening tokens are unpredictable for everyone and drown the AI↔human signal.
+// Sample = the 5 most recent standalone posts (no retweets, no replies) long
+// enough to fill a full grid row. Each post is walked for exactly
+// DROP_K + GRID_COLS = 18 tokens: the first DROP_K are dropped (with no shared
+// stem, opening tokens are unpredictable for everyone and drown the AI↔human
+// signal) and the next GRID_COLS are scored — so a several-paragraph post
+// costs the same compute as a short one, and the share grid is always
+// SAMPLE_TWEETS × GRID_COLS (5×8), emoji-shareable like the self-test.
 // Words are the sampling-time proxy for tokens — the greedy walk consumes at
-// most one word per step, so > DROP_K words guarantees > DROP_K scored tokens
-// on every model, and all 5 posts contribute. Thin accounts can't be graded
-// fairly, so require a floor of posts and words.
+// most one word per step, so ≥ DROP_K + GRID_COLS words guarantees a full row
+// on every model. Thin accounts can't be graded fairly, so floor the sample.
 const SAMPLE_TWEETS = 5;
 const DROP_K = 10;
+const GRID_COLS = 8;
 const MIN_SAMPLE_TWEETS = 5;
 const MIN_SAMPLE_WORDS = 40;
+// Repeat lookups of the same handle reuse the stored result for a week —
+// popular accounts would otherwise re-burn scraper credits + inference on
+// every curious visitor. A week is fine: 5 recent posts don't move fast.
+const DIAGNOSE_CACHE_MS = 7 * 86400 * 1000;
 
 export default {
   async fetch(request, env, ctx) {
@@ -63,8 +71,8 @@ export default {
     }
     // Fire-and-forget traffic instrumentation.
     if (request.method === 'GET' && url.pathname === '/') logEvent(env, ctx, request, 'pageview');
-    else if (request.method === 'GET' && /^\/r\/[0-9a-fA-F-]{8,}$/.test(url.pathname)) {
-      logEvent(env, ctx, request, 'result_view');
+    else if (['GET', 'HEAD'].includes(request.method) && /^\/r\/[0-9a-fA-F-]{8,}$/.test(url.pathname)) {
+      if (request.method === 'GET') logEvent(env, ctx, request, 'result_view');
       // Result pages can name a real person (diagnosed X accounts), so keep
       // them out of search indexes. The SPA shell is shared, so we noindex all
       // /r/ pages via header; the homepage stays indexable.
@@ -215,6 +223,42 @@ async function api(request, env, url, ctx) {
     return json({ mock: isMock(env) });
   }
 
+  // TEMPORARY latency bench (staging only: BENCH var unset in prod → 404).
+  // Fires n parallel single-token logprob calls at the HF router to measure
+  // whether the Workers simultaneous-connection cap serializes a wide fan-out.
+  if (env.BENCH === '1' && request.method === 'GET' && pathname === '/api/_bench') {
+    const n = Math.min(64, Number(url.searchParams.get('n') || 24));
+    const model = MODELS[0];
+    const t0 = Date.now();
+    const times = await Promise.all(
+      Array.from({ length: n }, async (_, i) => {
+        const s = Date.now();
+        await fetch('https://router.huggingface.co/v1/chat/completions', {
+          method: 'POST',
+          headers: { authorization: `Bearer ${env.HF_TOKEN}`, 'content-type': 'application/json' },
+          body: JSON.stringify({
+            model: model.id,
+            messages: [
+              { role: 'user', content: 'Write a single short, natural social media post.' },
+              { role: 'assistant', content: 'the breakfast burrito at the airport ' + 'gate '.repeat(i % 6) },
+            ],
+            max_tokens: 1,
+            logprobs: true,
+            top_logprobs: 20,
+          }),
+          signal: AbortSignal.timeout(30_000),
+        }).then((r) => r.text());
+        return Date.now() - s;
+      })
+    );
+    return json({
+      n,
+      wallMs: Date.now() - t0,
+      perCallAvgMs: Math.round(times.reduce((a, b) => a + b, 0) / n),
+      perCallMaxMs: Math.max(...times),
+    });
+  }
+
   // Client-side event beacon (share taps). Only 'share' is client-loggable;
   // pageview/result_view are logged server-side to prevent inflation.
   if (request.method === 'POST' && pathname === '/api/event') {
@@ -355,11 +399,40 @@ async function api(request, env, url, ctx) {
     const body = await request.json().catch(() => ({}));
     const handle = parseHandle(body.input);
     if (!handle) {
-      return json({ error: "that doesn't look like an X handle or link", code: 'badinput' }, 400);
+      return json({ error: "that doesn't look like an X handle", code: 'badinput' }, 400);
     }
 
     if (await isBlocked(env, handle)) {
       return json({ error: 'this account asked to be removed from the tool', code: 'blocked' }, 403);
+    }
+
+    // Cache: serve a recent diagnosis of the same account instead of re-running
+    // the scrape + 15 model walks. Checked before the daily-cap bump — a cache
+    // hit costs nothing upstream. Percentile is recomputed (it drifts as more
+    // accounts get graded).
+    const cached = await env.DB.prepare(
+      `SELECT * FROM results WHERE subject_type = 'account' AND lower(subject_handle) = ?
+       AND created_at > ? ORDER BY created_at DESC LIMIT 1`
+    )
+      .bind(handle.toLowerCase(), Date.now() - DIAGNOSE_CACHE_MS)
+      .first();
+    if (cached) {
+      const grid = cached.grid ? JSON.parse(cached.grid) : null;
+      return json({
+        id: cached.id,
+        overall: cached.overall,
+        perModel: JSON.parse(cached.per_model),
+        grid,
+        sources: cached.sources ? JSON.parse(cached.sources) : [],
+        percentile: await percentile(env, cached.overall, 'account'),
+        cached: true,
+        subject: {
+          type: 'account',
+          handle: cached.subject_handle,
+          name: cached.subject_name,
+          kept: grid ? grid.length : null,
+        },
+      });
     }
 
     if (await overDailyCap(env)) {
@@ -386,7 +459,7 @@ async function api(request, env, url, ctx) {
         maxTweets: SAMPLE_TWEETS,
         targetWords: Infinity, // exactly SAMPLE_TWEETS posts, not a word budget
         excludeReplies: true,
-        minWordsPerTweet: DROP_K + 1, // every sampled post survives the drop
+        minWordsPerTweet: DROP_K + GRID_COLS, // every post fills a full grid row
         maxPages: 6, // reply-heavy / short-post timelines need a deeper scan
       }));
     } catch (err) {
@@ -399,10 +472,15 @@ async function api(request, env, url, ctx) {
       );
     }
 
-    // Score every (post × model) walk with bounded concurrency.
+    // Score every (post × model) walk with bounded concurrency. Each walk is
+    // capped at DROP_K + GRID_COLS steps — fixed compute per post.
     const jobs = [];
     for (const t of samples) for (const m of MODELS) jobs.push({ t, m });
-    const scored = await pMap(jobs, async ({ t, m }) => ({ t, m, r: await scoreText(env, m, t.text) }), 8);
+    const scored = await pMap(
+      jobs,
+      async ({ t, m }) => ({ t, m, r: await scoreText(env, m, t.text, DROP_K + GRID_COLS) }),
+      8
+    );
 
     // Reconcile the usage counter with the real number of model walks done
     // (overDailyCap already charged 1 above).
@@ -421,7 +499,7 @@ async function api(request, env, url, ctx) {
       for (const t of samples) {
         const r = byId[t.id]?.[m.id];
         if (!r || !r.perStep?.length) continue;
-        const kept = r.perStep.slice(DROP_K);
+        const kept = r.perStep.slice(DROP_K, DROP_K + GRID_COLS);
         if (!kept.length) continue;
         sumSurpr += -kept.reduce((s, p) => s + p.logprob, 0);
         sumTok += kept.length;
@@ -564,26 +642,32 @@ function buildGrid(rows) {
   return grid;
 }
 
-// Build the account share grid: one row per sampled post, one cell per word,
-// colored by the word's surprisal averaged across models. Same shape as
-// buildGrid, but rows are posts (prompt is the @handle, answer is the post).
+// Build the account share grid: one row per sampled post, always GRID_COLS
+// cells wide (5×8 with the current tuning — clean emoji share). Cell j is the
+// heat of the models' (DROP_K + j)-th scored token, averaged by position:
+// token boundaries differ per model, but position j is the same depth into the
+// same post, and a fixed-width row beats word-alignment for shareability.
 function buildDiagnoseGrid(samples, byId, handle) {
   const grid = [];
   for (const t of samples) {
     const perModel = byId[t.id];
     if (!perModel) continue;
-    const words = String(t.text).trim().split(/\s+/);
-    const pws = MODELS.map((m) => perModel[m.id]?.perWord || []);
-    const cells = words.map((_, i) => {
-      const vals = pws.map((pw) => pw[i]).filter((v) => v != null);
-      if (!vals.length) return null;
-      return heatLevel(vals.reduce((a, b) => a + b, 0) / vals.length);
-    });
-    // Per-post surprisal (mean model avgKL) so the share page can rank
-    // most- vs least-clanker posts.
-    const kls = MODELS.map((m) => perModel[m.id]?.avgKL).filter((v) => v != null);
+    const cells = [];
+    for (let j = 0; j < GRID_COLS; j++) {
+      const vals = MODELS.map((m) => perModel[m.id]?.perStep?.[DROP_K + j])
+        .filter(Boolean)
+        .map((s) => -s.logprob);
+      cells.push(vals.length ? heatLevelText(vals.reduce((a, b) => a + b, 0) / vals.length) : null);
+    }
+    // Per-post surprisal over the scored window so the share page can rank
+    // most- vs least-clanker posts (consistent with the headline aggregation).
+    const kls = MODELS.map((m) => {
+      const kept = (perModel[m.id]?.perStep || []).slice(DROP_K, DROP_K + GRID_COLS);
+      if (!kept.length) return null;
+      return -kept.reduce((s, p) => s + p.logprob, 0) / kept.length;
+    }).filter((v) => v != null);
     const kl = kls.length ? Math.round((kls.reduce((a, b) => a + b, 0) / kls.length) * 100) / 100 : null;
-    grid.push({ prompt: `@${handle}`, answer: words.join(' '), cells, kl });
+    grid.push({ prompt: `@${handle}`, answer: t.text, cells, kl });
   }
   return grid;
 }

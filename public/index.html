@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>how clanker are you? — a reverse Turing test</title>
-  <meta name="description" content="Finish a few sentences. We measure the surprisal of your writing under AI models — how well they predicted you — and score how much clanker is in you.">
+  <meta name="description" content="Drop an @handle — we pull their recent posts and measure the surprisal of their writing under AI models to score how clanker (AI-like) they are. Or finish a few sentences and diagnose yourself.">
   <link rel="canonical" href="https://howclankerareyou.com/">
   <meta name="theme-color" content="#f2efe6">
 
@@ -20,7 +20,7 @@
   <meta property="og:site_name" content="how clanker are you?">
   <meta property="og:url" content="https://howclankerareyou.com/">
   <meta property="og:title" content="how clanker are you?">
-  <meta property="og:description" content="A reverse Turing test: finish a few sentences and we measure how surprising your writing is to the machines. Find out how much clanker is in you.">
+  <meta property="og:description" content="A surprisal Turing test: drop any @handle and we grade how clanker (AI-like) their posts read to the machines — or finish a few sentences and diagnose yourself.">
   <meta property="og:image" content="https://howclankerareyou.com/og.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
@@ -29,7 +29,7 @@
   <!-- twitter -->
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="how clanker are you?">
-  <meta name="twitter:description" content="A reverse Turing test. How surprising is your writing to the machines?">
+  <meta name="twitter:description" content="A surprisal Turing test. Drop an @handle — how surprising are their posts to the machines?">
   <meta name="twitter:image" content="https://howclankerareyou.com/og.png">
 
   <!-- structured data -->
@@ -39,7 +39,7 @@
     "@type": "WebApplication",
     "name": "how clanker are you?",
     "url": "https://howclankerareyou.com/",
-    "description": "A reverse Turing test that measures the surprisal of your writing under language models.",
+    "description": "A surprisal Turing test: grade how AI-like any X account's posts read to language models, or diagnose your own writing.",
     "applicationCategory": "GameApplication",
     "operatingSystem": "Any",
     "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
@@ -56,12 +56,12 @@
     <section id="view-landing" hidden>
       <h1 class="title">how clanker<br>are you?</h1>
       <p class="sub">// a surprisal Turing test</p>
-      <p>Drop an <span class="accent">@handle</span> (or paste an X link) — we pull
-      their recent posts and grade how clanker (AI-like) they write. Language models
-      predict the next token; the more predictable the writing, the more clanker.</p>
+      <p>Drop an <span class="accent">@handle</span> — we pull their recent posts
+      and grade how clanker (AI-like) they write. Language models predict the next
+      token; the more predictable the writing, the more clanker.</p>
       <form class="searchbar" id="diag-form">
         <input id="diag-input" type="text" autocomplete="off" autocapitalize="off"
-               spellcheck="false" placeholder="@handle or paste an X link…">
+               spellcheck="false" placeholder="@handle" maxlength="16">
         <button id="btn-diagnose" type="submit">diagnose ▶</button>
       </form>
       <p class="err" id="diag-err" hidden></p>

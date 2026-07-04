@@ -79,6 +79,7 @@ ADMIN_EMAILS = "nliolios24@gmail.com"
 [env.staging.vars]
 MOCK_INFERENCE = "0"
 DAILY_CALL_CAP = "3000"          # low ceiling — bounds test spend on the shared HF credit
+BENCH = "1"                      # enables /api/_bench (latency probe); NEVER set in prod
 
 [[env.staging.routes]]
 pattern = "staging.howclankerareyou.com"

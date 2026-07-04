@@ -47,7 +47,7 @@ async function runDiagnose() {
   const errEl = $('diag-err');
   errEl.hidden = true;
   if (!input) {
-    errEl.textContent = 'enter an @handle or an X link.';
+    errEl.textContent = 'enter an @handle.';
     errEl.hidden = false;
     return;
   }
@@ -70,21 +70,19 @@ async function runDiagnose() {
 
 // Best-effort handle for the gathering screen before the server confirms it.
 function guessHandle(input) {
-  const m = input.match(/(?:x\.com|twitter\.com)\/@?([A-Za-z0-9_]{1,15})/i);
-  if (m) return m[1];
   return input.replace(/^@/, '').replace(/[^A-Za-z0-9_].*$/, '').slice(0, 15) || 'them';
 }
 
 function diagnoseErrorText(err) {
   switch (err.code) {
     case 'badinput':
-      return "that doesn't look like an X handle or link — try @handle.";
+      return "that doesn't look like an X handle — just the @handle, no links.";
     case 'notfound':
-      return err.message + ' — check the spelling, or paste their profile link.';
+      return err.message + ' — check the spelling.';
     case 'protected':
       return err.message + ' — this account is private, so we can’t read it. try a public one.';
     case 'thin':
-      return err.message + ' — we need 5 recent original posts. try someone more active.';
+      return err.message + ' — we need 5 recent original posts of ~18+ words. try someone wordier.';
     case 'blocked':
       return 'this account asked to be removed from the tool.';
     case 'ratelimited':
@@ -261,9 +259,11 @@ function renderResults(fin, live) {
   // Headline.
   if (acct) {
     const kept = fin.subject.kept || (fin.grid ? fin.grid.length : null);
-    $('res-context').innerHTML = kept
-      ? `graded from ${kept} public posts on X · <a href="https://x.com/${esc(handle)}" target="_blank" rel="noopener" style="color:var(--accent)">@${esc(handle)}</a>`
-      : `graded from public posts on X · @${esc(handle)}`;
+    const cachedNote = fin.cached ? ' · graded earlier this week' : '';
+    $('res-context').innerHTML =
+      (kept
+        ? `graded from ${kept} public posts on X · <a href="https://x.com/${esc(handle)}" target="_blank" rel="noopener" style="color:var(--accent)">@${esc(handle)}</a>`
+        : `graded from public posts on X · @${esc(handle)}`) + cachedNote;
     $('res-score').textContent = `${fin.overall}%`;
     $('res-score').previousSibling.textContent = `@${handle} is `;
     $('res-verdict').textContent = ACCOUNT_VERDICTS.find(([min]) => fin.overall >= min)[1];
@@ -329,7 +329,7 @@ function renderResults(fin, live) {
       )
       .join('');
     $('grid-legend').innerHTML = acct
-      ? 'one square per sampled word · <span class="good">green</span> = human · <span class="accent">red</span> = clanker'
+      ? 'one row per post, one square per scored token · <span class="good">green</span> = human · <span class="accent">red</span> = clanker'
       : 'one square per word · <span class="good">green</span> = human · <span class="accent">red</span> = clanker';
     $('grid-legend').hidden = false;
   } else {

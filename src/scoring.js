@@ -61,6 +61,8 @@ const FLOOR_MIN = -14;
 const TEXT_PRIME =
   `Write a single short, natural social media post. ` +
   `Plain text only, no quotation marks, no hashtags.`;
+// Fallback step budget; the diagnose endpoint passes an explicit cap
+// (DROP_K + GRID_COLS = 18) so per-post compute is fixed.
 const MAX_STEPS_TEXT = 45;
 
 // Re-anchored 2026-07-03 so any-LLM paste scores high: with the generic-LLM d0
@@ -95,9 +97,10 @@ export async function scoreModel(env, model, promptText, completion) {
 
 // Free-form post: no stem. The model is primed to compose a post (TEXT_PRIME)
 // and we walk the real post text from an empty prefix. Same greedy machinery,
-// longer step budget, empty seed.
-export async function scoreText(env, model, text) {
-  return walk(env, model.id, TEXT_PRIME, text, { maxSteps: MAX_STEPS_TEXT, seed: '' });
+// empty seed. Callers cap maxSteps (drop window + scored window) so a long
+// post costs the same as a short one.
+export async function scoreText(env, model, text, maxSteps = MAX_STEPS_TEXT) {
+  return walk(env, model.id, TEXT_PRIME, text, { maxSteps, seed: '' });
 }
 
 // Greedy top-20 token walk shared by both scorers. `userMsg` is the fixed user
@@ -160,6 +163,18 @@ export function heatLevel(kl) {
   if (kl < 2.0) return 0;
   if (kl < 4.5) return 1;
   if (kl < 7.5) return 2;
+  return 3;
+}
+
+// Same idea for free-form post tokens, shifted for that regime: unanchored
+// text runs ~2.5 nats hotter than a stem-anchored completion (the d0→d0text
+// shift), so the self-test buckets paint every account green. These buckets
+// center on the observed account range (avgKL ~5–10).
+export function heatLevelText(kl) {
+  if (kl == null) return null;
+  if (kl < 4.5) return 0;
+  if (kl < 6.5) return 1;
+  if (kl < 8.5) return 2;
   return 3;
 }
 
