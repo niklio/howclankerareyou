@@ -57,7 +57,11 @@
 </head>
 <body>
   <main id="app">
-    <section id="view-landing" hidden>
+    <!-- Landing is visible by default so its H1 + copy render without waiting
+         on app.js (SEO + faster first paint). app.js's show() manages views
+         after load; the guard below re-hides it on /r/ share pages so they
+         don't flash the landing before the verdict loads. -->
+    <section id="view-landing">
       <h1 class="title">how clanker<br>are you?</h1>
       <p class="sub">// a surprisal Turing test</p>
       <p>Drop anyone's <span class="accent">X handle</span> — we pull their recent posts
@@ -73,6 +77,12 @@
       <p class="demo" id="demo-note" hidden>⚠ demo mode: inference isn't funded
       yet — scores come from a deterministic stand-in, not the real models.</p>
     </section>
+    <script>
+      // /r/ share pages load a verdict into #view-results; keep the (now
+      // default-visible) landing hidden for them so it doesn't flash before
+      // app.js swaps views. Runs during parse, before first paint.
+      if (location.pathname.startsWith('/r/')) document.getElementById('view-landing').hidden = true;
+    </script>
 
     <section id="view-gather" hidden>
       <div class="tag" id="gather-tag">// diagnosing</div>
@@ -135,7 +145,7 @@
       <span id="method-demo" hidden>(demo mode: logprobs are currently simulated.)</span></p>
     </section>
   </main>
-  <footer>built by <a href="https://nikliolios.com" target="_blank" rel="noopener">nik liolios</a></footer>
+  <footer><a href="/faq">what is a clanker?</a> · built by <a href="https://nikliolios.com" target="_blank" rel="noopener">nik liolios</a></footer>
   <script src="/app.js"></script>
 </body>
 </html>

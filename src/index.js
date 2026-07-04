@@ -99,6 +99,17 @@ export default {
       const headers = new Headers(res.headers);
       headers.set('x-robots-tag', 'noindex');
       let out = new Response(res.body, { status: res.status, headers });
+      // Belt-and-suspenders noindex: the header above already covers Google/
+      // Bing, but inject a visible <meta name="robots"> into the shell too so
+      // the directive is in the page source for crawlers/tools that read the
+      // tag but not the header. Independent of the row lookup below.
+      if (request.method === 'GET' && res.ok) {
+        out = new HTMLRewriter()
+          .on('head', {
+            element: (e) => e.append('<meta name="robots" content="noindex, follow">', { html: true }),
+          })
+          .transform(out);
+      }
       // Link previews: crawlers don't run JS, so bake the verdict into the
       // OG/Twitter meta of the served shell ("@handle is 27.5% clanker").
       if (request.method === 'GET' && res.ok) {
