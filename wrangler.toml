@@ -3,6 +3,12 @@ main = "src/index.js"
 compatibility_date = "2026-01-01"
 workers_dev = true
 
+# Bundle woff fonts as raw bytes for the dynamic OG-image renderer (satori).
+[[rules]]
+type = "Data"
+globs = ["**/*.woff"]
+fallthrough = true
+
 # Static frontend; the Worker handles /api/*, assets serve everything else.
 [assets]
 directory = "./public"
