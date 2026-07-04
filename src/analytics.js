@@ -134,7 +134,14 @@ export async function gatherAnalytics(env, range = 'week') {
   const totalResultViews = sum(resultViews);
   const totalDiagAttempts = sum(diagAttempts);
   const totalDiagSuccess = sum(diagSuccess);
-  const totalUniques = sum(uniques);
+  // DISTINCT doesn't sum across buckets (one visitor active in 6 hourly
+  // buckets would count 6× in the day view but ~1× in the week view — the
+  // classic "day > week" artifact). The true total is one DISTINCT over the
+  // whole window; the per-bucket series stays for the chart shape only.
+  const uqRow = await q(
+    `SELECT COUNT(DISTINCT visitor) n FROM events WHERE type='pageview' AND ${cond('ts')}`
+  );
+  const totalUniques = uqRow[0]?.n || 0;
   const plays = keys.map((k, i) => [k, diagSuccess[i][1] + completed[i][1]]);
   const totalPlays = totalDiagSuccess + totalCompleted;
   const replayRows = await q(
@@ -244,7 +251,7 @@ export async function gatherAnalytics(env, range = 'week') {
     ],
     plots: [
       { label: 'Plays', series: plays },
-      { label: 'Unique visitors', series: uniques },
+      { label: 'Unique visitors', series: uniques, total: totalUniques },
       { label: 'Share actions', series: shares },
       { label: 'Share-link opens', series: resultViews },
     ],

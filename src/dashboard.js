@@ -107,7 +107,9 @@ function render(d){
   const h=d.headline, tail=d.range==='day'?' today':'';
   const plot=(p)=>{
     const isLat=p.label.indexOf('latency')>=0;
-    const agg=isLat?('max '+fmt(Math.max(0,...p.series.map(x=>x[1])))+'ms'):(fmt(sum(p.series))+tail);
+    // p.total overrides the naive per-bucket sum for non-additive metrics
+    // (unique visitors: DISTINCT can't be summed across buckets).
+    const agg=isLat?('max '+fmt(Math.max(0,...p.series.map(x=>x[1])))+'ms'):(fmt(p.total!=null?p.total:sum(p.series))+tail);
     return '<div class="card"><h3>'+esc(p.label)+' <span style="color:var(--ink)">· '+agg+'</span></h3>'+lineChart(p.series)+'</div>';
   };
   const budgetPct=Math.min(100,d.budget.capPct);
