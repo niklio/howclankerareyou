@@ -337,8 +337,7 @@ function renderResults(fin, live) {
   const whom = reddit ? `u/${handle}` : `@${handle}`;
   const thinAcct = acct && fin.grid && fin.grid.length > 0 && fin.grid[0].cells.length === 10;
   if (acct) {
-    const cachedNote = (fin.cached ? ' · graded earlier this week' : '') +
-      (thinAcct ? '<br><span class="fine">thin account — graded from everything public we could find, take it with extra salt.</span>' : '');
+    const cachedNote = fin.cached ? ' · graded earlier this week' : '';
     const profile = reddit ? `https://www.reddit.com/user/${esc(handle)}` : `https://x.com/${esc(handle)}`;
     $('res-context').innerHTML =
       `graded from public ${reddit ? 'comments on reddit' : 'posts on X'} · <a href="${profile}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(whom)}</a>` +
@@ -380,6 +379,11 @@ function renderResults(fin, live) {
     </div>`
       )
       .join('');
+
+  const thinEl = $('res-thin');
+  thinEl.hidden = !thinAcct;
+  if (thinAcct)
+    thinEl.textContent = 'thin account — graded from everything public we could find, take it with extra salt.';
 
   $('res-details').innerHTML = renderDetails(fin.grid, acct);
 
