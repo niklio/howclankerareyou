@@ -618,7 +618,7 @@ async function api(request, env, url, ctx) {
         // Reddit with a completely empty comments feed: disambiguate hidden
         // history from genuine silence via the (public) posts feed.
         if (platform === 'reddit' && counts.fetched === 0) {
-          const posts = await probeSubmitted(user.handle).catch(() => null);
+          const posts = await probeSubmitted(env, user.handle).catch(() => null);
           if (posts > 0) {
             return diag(
               json({ error: `u/${user.handle} has posts but no publicly visible comments — reddit profiles can hide comment history. if that's you: reddit settings → profile → show your comments, then retry`, code: 'hidden', handle: user.handle }, 422),

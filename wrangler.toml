@@ -63,6 +63,12 @@ type = "ratelimit"
 namespace_id = "1003"
 simple = { limit = 6, period = 60 }    # per-IP account diagnoses / minute (scrape + 15 model calls each)
 
+[[unsafe.bindings]]
+name = "REDDIT_RL"
+type = "ratelimit"
+namespace_id = "1004"
+simple = { limit = 30, period = 60 }   # GLOBAL outbound reddit RSS fetches / minute (all users) — stay under their bot-defense radar
+
 [vars]
 # "1" forces the deterministic mock (src/mock.js). "0" uses real HF inference
 # via the HF_TOKEN secret. Live on real inference (HF PRO, $2/mo included credit).
@@ -119,6 +125,12 @@ name = "DIAGNOSE_RL"
 type = "ratelimit"
 namespace_id = "2003"
 simple = { limit = 6, period = 60 }   # per-IP Twitter diagnoses / minute (costly)
+
+[[env.staging.unsafe.bindings]]
+name = "REDDIT_RL"
+type = "ratelimit"
+namespace_id = "2004"
+simple = { limit = 30, period = 60 }  # GLOBAL outbound reddit RSS fetches / minute
 
 # (The former scorer-worker fan-out was removed 2026-07-04: echo scoring needs
 # only 15 upstream calls per diagnosis, which fit one invocation comfortably.)

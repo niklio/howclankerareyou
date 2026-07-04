@@ -24,11 +24,31 @@ function fail(code, message) {
   return e;
 }
 
-// Fetch a user's comment feed. 404 = no such user (definitive, no retry);
-// 403 = suspended/withheld (treated as not found — nothing to grade either
-// way); 429 = per-IP throttle, retried with backoff.
-async function fetchFeed(name, retries = 3) {
-  const url = `https://www.reddit.com/user/${name}/comments.rss`;
+// Circuit breaker: after reddit's bot defense blocks us once, this isolate
+// fails fast for a minute instead of adding heat to an already-hostile
+// window (per-isolate is fine — every isolate learns within one request).
+let blockedUntil = 0;
+
+// Fetch a user's feed (comments|submitted) with the full protection stack:
+//   1. 10-min edge cache — retries and repeat lookups never re-hit reddit
+//   2. global outbound ceiling (REDDIT_RL, all users combined) — bursts hit
+//      OUR limiter before reddit's
+//   3. circuit breaker on bot-defense 403s, and NO retries against them
+//      (block windows outlast any backoff; retrying is pure heat)
+// 404 = no such user (definitive null); plain 403 = suspended (null);
+// 429 = per-IP throttle, retried gently.
+async function fetchFeed(env, name, kind = 'comments', retries = 2) {
+  if (Date.now() < blockedUntil) throw fail('upstream', 'reddit cooling down');
+  const url = `https://www.reddit.com/user/${name.toLowerCase()}/${kind}.rss`;
+
+  const cached = await caches.default.match(url).catch(() => null);
+  if (cached) return cached.text();
+
+  if (env?.REDDIT_RL) {
+    const { success } = await env.REDDIT_RL.limit({ key: 'reddit' });
+    if (!success) throw fail('upstream', 'reddit fetch budget exhausted');
+  }
+
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -39,24 +59,32 @@ async function fetchFeed(name, retries = 3) {
       if (res.status === 404) return null;
       if (res.status === 403) {
         // Two very different 403s: reddit's bot defense serves an HTML block
-        // page (throttling — retry it), while a suspended account's feed is a
-        // plain 403 (account state — definitive null). Mixing them up tells
-        // users a real account "doesn't exist".
+        // page (throttling), while a suspended account's feed is a plain 403
+        // (account state — definitive null).
         const body = await res.text();
         if (/theme-beta|network security|blocked|<html/i.test(body.slice(0, 500))) {
-          lastErr = new Error('reddit rss blocked (403 throttle)');
-        } else {
-          return null;
+          blockedUntil = Date.now() + 60_000;
+          throw fail('upstream', 'reddit bot-defense window');
         }
-      } else if (res.ok) {
-        return await res.text();
-      } else {
-        lastErr = new Error(`reddit rss ${res.status}`);
+        return null;
       }
+      if (res.ok) {
+        const text = await res.text();
+        // Cache positives so retries/repeats are free for 10 minutes.
+        try {
+          await caches.default.put(
+            url,
+            new Response(text, { headers: { 'cache-control': 'public, s-maxage=600', 'content-type': 'application/atom+xml' } })
+          );
+        } catch {}
+        return text;
+      }
+      lastErr = new Error(`reddit rss ${res.status}`);
     } catch (err) {
+      if (err.code === 'upstream') throw err; // breaker set — stop immediately
       lastErr = err;
     }
-    if (attempt < retries) await sleep(700 * 2 ** attempt + Math.random() * 300);
+    if (attempt < retries) await sleep(900 * 2 ** attempt + Math.random() * 300);
   }
   throw lastErr || fail('upstream', 'reddit feed unavailable');
 }
@@ -90,14 +118,15 @@ const wordCount = (s) => (s ? s.split(/\s+/).filter(Boolean).length : 0);
 // (about.json is bot-blocked; submitted.rss isn't.) Comments-empty + posts-
 // present usually means the profile hides comment history — a setting the
 // account owner can flip (observed in the wild: they do, then retry).
-export async function probeSubmitted(name) {
-  const res = await fetch(`https://www.reddit.com/user/${name}/submitted.rss`, {
-    headers: { 'user-agent': UA },
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!res.ok) return null; // unknown — caller falls back to the generic message
-  const xml = await res.text();
-  return xml.split('<entry>').length - 1;
+// Runs through the same cache/limiter/breaker stack as the comments feed.
+export async function probeSubmitted(env, name) {
+  try {
+    const xml = await fetchFeed(env, name, 'submitted', 0);
+    if (xml == null) return null;
+    return xml.split('<entry>').length - 1;
+  } catch {
+    return null; // unknown — caller falls back to the generic message
+  }
 }
 
 // Fetch a redditor's most recent comments and clean them into scoreable
@@ -105,7 +134,7 @@ export async function probeSubmitted(name) {
 // null when the account doesn't exist (or is suspended — nothing to grade).
 export async function redditSamples(env, name, opts = {}) {
   const { maxItems = 5, minWords = 11, maxWordsPerItem = 45 } = opts;
-  const xml = await fetchFeed(name);
+  const xml = await fetchFeed(env, name);
   if (xml == null) return { user: null, samples: [], counts: { fetched: 0, kept: 0, words: 0, pages: 1 } };
 
   const entries = xml.split('<entry>').slice(1);
