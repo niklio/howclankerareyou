@@ -353,13 +353,13 @@ function wireResultButtons(fin, grid, url, live, acct) {
   const hasGrid = grid && grid.length;
 
   if (acct) {
-    // Account result: share the finding, then diagnose someone else / take the
-    // test yourself. (Opt-out is server-side only: /api/remove.)
-    if (live && hasGrid) {
+    // Account result — same layout for the diagnoser and a shared-link
+    // visitor: share (primary) + diagnose someone else (secondary) under the
+    // grid, a lone "take the test yourself" at the bottom. Recipients can
+    // share onward too. (Opt-out is server-side only: /api/remove.)
+    if (hasGrid) {
       share.hidden = false;
       share.onclick = () => shareResult(fin, grid, url, acct);
-      link.hidden = false;
-      link.onclick = () => navigator.clipboard.writeText(url).then(() => flash(link, 'link copied'));
     }
     diagAgain.hidden = false;
     diagAgain.onclick = () => (location.href = '/');
