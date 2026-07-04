@@ -72,15 +72,42 @@ export default {
     else if (['GET', 'HEAD'].includes(request.method) && /^\/r\/[A-Za-z0-9_-]{1,64}$/.test(url.pathname)) {
       // /r/<uuid> (self-tests, legacy links) or /r/<handle> (account share
       // links). meta = the key, so analytics can join views to results.
-      if (request.method === 'GET')
-        logEvent(env, ctx, request, 'result_view', { meta: url.pathname.slice(3) });
+      const key = url.pathname.slice(3);
+      if (request.method === 'GET') logEvent(env, ctx, request, 'result_view', { meta: key });
       // Result pages can name a real person (diagnosed X accounts), so keep
       // them out of search indexes. The SPA shell is shared, so we noindex all
       // /r/ pages via header; the homepage stays indexable.
       const res = await env.ASSETS.fetch(request);
       const headers = new Headers(res.headers);
       headers.set('x-robots-tag', 'noindex');
-      return new Response(res.body, { status: res.status, headers });
+      let out = new Response(res.body, { status: res.status, headers });
+      // Link previews: crawlers don't run JS, so bake the verdict into the
+      // OG/Twitter meta of the served shell ("@handle is 27.5% clanker").
+      if (request.method === 'GET' && res.ok) {
+        try {
+          const row = await resultByKey(env, key);
+          if (row) {
+            const acct = row.subject_type === 'account';
+            const title = acct
+              ? `@${row.subject_handle} is ${row.overall}% clanker`
+              : `certified ${row.overall}% clanker`;
+            const desc = acct
+              ? `graded from @${row.subject_handle}'s public posts on X — word by word, by the models. how clanker are you?`
+              : `a surprisal Turing test, taken by a human (allegedly). how clanker are you?`;
+            const set = (attr) => ({ element: (e) => e.setAttribute('content', attr) });
+            out = new HTMLRewriter()
+              .on('title', { element: (e) => e.setInnerContent(`${title} — how clanker are you?`) })
+              .on('meta[property="og:title"]', set(title))
+              .on('meta[name="twitter:title"]', set(title))
+              .on('meta[property="og:description"]', set(desc))
+              .on('meta[name="twitter:description"]', set(desc))
+              .on('meta[name="description"]', set(desc))
+              .on('meta[property="og:url"]', set(`${CANONICAL}/r/${key}`))
+              .transform(out);
+          }
+        } catch {} // preview sweetening must never break the page
+      }
+      return out;
     }
     return env.ASSETS.fetch(request);
   },
@@ -646,22 +673,8 @@ async function api(request, env, url, ctx) {
   }
 
   if (request.method === 'GET' && pathname.startsWith('/api/result/')) {
-    // The key is either a result UUID (self-tests, legacy account links) or an
-    // X handle (short share links: /r/jack → jack's LATEST diagnosis). The
-    // shapes can't collide: UUIDs are 36 chars with dashes, handles are ≤15
-    // chars of [A-Za-z0-9_].
     const key = decodeURIComponent(pathname.slice('/api/result/'.length));
-    let row = null;
-    if (/^[0-9a-fA-F-]{16,}$/.test(key)) {
-      row = await env.DB.prepare('SELECT * FROM results WHERE id = ?').bind(key).first();
-    } else if (/^[A-Za-z0-9_]{1,15}$/.test(key)) {
-      row = await env.DB.prepare(
-        `SELECT * FROM results WHERE subject_type = 'account' AND lower(subject_handle) = ?
-         ORDER BY created_at DESC LIMIT 1`
-      )
-        .bind(key.toLowerCase())
-        .first();
-    }
+    const row = await resultByKey(env, key);
     if (!row) return json({ error: 'not found' }, 404);
     const out = {
       id: row.id,
@@ -762,6 +775,25 @@ async function addUsage(env, n) {
   } catch {
     return null;
   }
+}
+
+// Resolve a result by key: either a result UUID (self-tests, legacy account
+// links) or an X handle (short share links: /r/jack → jack's LATEST
+// diagnosis, case-insensitive). The shapes can't collide: UUIDs are 36 chars
+// with dashes, handles ≤15 chars of [A-Za-z0-9_].
+async function resultByKey(env, key) {
+  if (/^[0-9a-fA-F-]{16,}$/.test(key)) {
+    return env.DB.prepare('SELECT * FROM results WHERE id = ?').bind(key).first();
+  }
+  if (/^[A-Za-z0-9_]{1,15}$/.test(key)) {
+    return env.DB.prepare(
+      `SELECT * FROM results WHERE subject_type = 'account' AND lower(subject_handle) = ?
+       ORDER BY created_at DESC LIMIT 1`
+    )
+      .bind(key.toLowerCase())
+      .first();
+  }
+  return null;
 }
 
 // Whether a handle has opted out. Fail-open (treat errors as not-blocked) so a
