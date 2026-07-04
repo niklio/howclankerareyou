@@ -113,28 +113,27 @@ function render(d){
   const budgetPct=Math.min(100,d.budget.capPct);
   const rangeBtns=['day','week','month','all'].map(r=>'<button data-r="'+r+'"'+(r===d.range?' class="active"':'')+'>'+r+'</button>').join('');
   const mix=d.playMix||[];
+  const loopN=(stage)=>((d.loop||[]).find(s=>s.stage===stage)||{}).n||0;
   document.getElementById('app').innerHTML=
     '<header><h1>clanker · analytics</h1><div class="right">'+
       '<div class="range" id="range">'+rangeBtns+'</div>'+
       '<span class="who">'+esc(EMAIL)+' · <a href="https://howclankerareyou.com/auth/logout?next='+encodeURIComponent(location.href)+'">sign out</a></span>'+
     '</div></header>'+
     '<main>'+
-    // --- the loop: one funnel, one K ---
+    // --- the loop IS the top row: five stages left to right, each card's
+    // sub-label carrying the conversion from the previous stage.
     '<div class="row stats">'+
-      stat(h.kViral,'K (viral coeff.)','plays a play generates; >1 = flywheel')+
-      stat(h.plays,'plays',h.playsAccount+' account · '+h.playsSelf+' self')+
-      stat(h.playRate+'%','play rate','of unique visitors')+
-      stat(h.shareRate+'%','share rate','of plays')+
-      stat(h.opensPerShare,'opens / share')+
-      stat('$'+h.spend,'spend')+
+      stat(fmt(loopN('unique visitors')),'unique visitors')+
+      stat(fmt(h.plays),'plays',h.playsAccount+' acct · '+h.playsSelf+' self · '+h.playRate+'% of visitors')+
+      stat(fmt(loopN('shares')),'shares',h.shareRate+'% of plays')+
+      stat(fmt(loopN('share-link opens')),'share-link opens',h.opensPerShare+' per share')+
+      stat(fmt(loopN('replays (CTA back in)')),'replays','K = '+h.kViral)+
     '</div>'+
-    '<div class="card"><h3>The loop — visitor → play → share → open → replay</h3>'+
-      bars((d.loop||[]).map(s=>({l:s.stage,v:s.n})),'l','v')+'</div>'+
     '<div class="section"><span>loop trends <span class="hint">'+(RLABEL[d.range]||'')+'</span></span></div>'+
     '<div class="row grid">'+d.plots.map(plot).join('')+'</div>'+
     // --- health: is the machine serving the loop OK ---
     '<div class="section"><span>health <span class="hint">'+(RLABEL[d.range]||'')+' · diagnose success '+d.diagnoseSuccessRate+'% · self-test completion '+d.selfCompletionRate+'%</span></span></div>'+
-    '<div class="card"><h3>HF budget — '+d.budget.todayCalls+' / '+d.budget.dailyCap+' calls today ('+d.budget.capPct+'% of daily cap) · '+(d.budget.twitterPagesToday||0)+' twitterapi pages today</h3><div class="budget"><div style="width:'+budgetPct+'%"></div></div></div>'+
+    '<div class="card"><h3>HF budget — '+d.budget.todayCalls+' / '+d.budget.dailyCap+' calls today ('+d.budget.capPct+'% of daily cap) · '+(d.budget.twitterPagesToday||0)+' twitterapi pages today · $'+h.spend+' spend in range</h3><div class="budget"><div style="width:'+budgetPct+'%"></div></div></div>'+
     '<div class="row grid">'+(d.healthPlots||[]).map(plot).join('')+'</div>'+
     // --- details (all-time) ---
     '<div class="section"><span>details <span class="hint">· all time</span></span></div><div class="row grid">'+
