@@ -389,7 +389,7 @@ function renderResults(fin, live) {
       )
       .join('');
     $('grid-legend').innerHTML = acct
-      ? 'one row per post, one square per scored token · <span class="good">green</span> = human · <span class="accent">red</span> = clanker'
+      ? 'one row per post, one square per scored word · <span class="good">green</span> = human · <span class="accent">red</span> = clanker'
       : 'one square per word · <span class="good">green</span> = human · <span class="accent">red</span> = clanker';
     $('grid-legend').hidden = false;
   } else {
@@ -443,7 +443,7 @@ function wireResultButtons(fin, grid, url, live, acct) {
       share.hidden = false;
       share.onclick = () => shareResult(fin, grid, url, acct);
       link.hidden = false;
-      link.onclick = () => navigator.clipboard.writeText(url).then(() => flash(link, 'link copied'));
+      link.onclick = async () => flash(link, (await copyText(url)) ? 'link copied' : 'copy blocked');
     }
     again.hidden = false;
     again.classList.remove('big');
@@ -503,11 +503,37 @@ async function shareResult(fin, grid, url, acct) {
       if (err && err.name === 'AbortError') return;
     }
   }
+  if (await copyText(text)) {
+    flash($('btn-share'), 'copied — paste anywhere ▶');
+  } else {
+    // Even the legacy path is blocked (some webviews): the address bar holds
+    // the share link, so point there instead of dead-ending.
+    flash($('btn-share'), 'copy blocked — share the address-bar link');
+  }
+}
+
+// Copy with fallbacks: in-app/AI browsers (Atlas, Comet, various WKWebViews)
+// often block BOTH navigator.share and the async clipboard API. The legacy
+// textarea + execCommand('copy') path still works in nearly all of them.
+async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
-    flash($('btn-share'), 'copied — paste anywhere ▶');
+    return true;
+  } catch {}
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
   } catch {
-    flash($('btn-share'), 'copy failed');
+    return false;
   }
 }
 
