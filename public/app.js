@@ -475,11 +475,15 @@ const EMOJI = ['🟥', '🟧', '🟨', '🟩']; // 0 clanker → 3 human
 const gridToEmoji = (grid) =>
   grid.map((row) => row.cells.map((c) => (c == null ? '⬜' : EMOJI[c])).join('')).join('\n');
 
+// Self shares keep the Wordle-style emoji grid (it's YOUR square); account
+// shares drop it — a stranger's grid reads as noise — and carry the verdict
+// quip instead. The link unfurls into the OG card for the visual.
 function shareText(fin, grid, url, acct) {
-  const head = acct
-    ? `@${fin.subject.handle} is ${fin.overall}% clanker 🤖 — how clanker are you?`
-    : `how clanker are you? — ${fin.overall}% clanker 🤖`;
-  return `${head}\n\n${gridToEmoji(grid)}\n\n${url}`;
+  if (acct) {
+    const quip = ACCOUNT_VERDICTS.find(([min]) => fin.overall >= min)[1];
+    return `@${fin.subject.handle} is ${fin.overall}% clanker 🤖\n${quip}\n\n${url}`;
+  }
+  return `how clanker are you? — ${fin.overall}% clanker 🤖\n\n${gridToEmoji(grid)}\n\n${url}`;
 }
 
 async function shareResult(fin, grid, url, acct) {
