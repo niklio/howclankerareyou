@@ -96,6 +96,8 @@ function bars(items,labelKey,valKey,fmtv){
     '<span class="val">'+(fmtv?fmtv(i[valKey]):fmt(i[valKey]))+'</span></div>').join('');
 }
 const fmt=(n)=>n>=1000?(n/1000).toFixed(1)+'k':(Number.isInteger(n)?n:n.toFixed(2));
+const ago=(ms)=>{const s=(Date.now()-ms)/1000;
+  return s<90?'just now':s<5400?Math.round(s/60)+'m ago':s<129600?Math.round(s/3600)+'h ago':Math.round(s/86400)+'d ago';};
 const esc=(s)=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const sum=(s)=>s.reduce((a,p)=>a+p[1],0);
 
@@ -137,6 +139,11 @@ function render(d){
     '<div class="section"><span>health <span class="hint">'+(RLABEL[d.range]||'')+' · diagnose success '+d.diagnoseSuccessRate+'% · self-test completion '+d.selfCompletionRate+'%</span></span></div>'+
     '<div class="card"><h3>HF budget — '+d.budget.todayCalls+' / '+d.budget.dailyCap+' calls today ('+d.budget.capPct+'% of daily cap) · '+(d.budget.twitterPagesToday||0)+' twitterapi pages today · $'+h.spend+' spend in range</h3><div class="budget"><div style="width:'+budgetPct+'%"></div></div></div>'+
     '<div class="row grid">'+(d.healthPlots||[]).map(plot).join('')+'</div>'+
+    // --- live feed: latest fresh account grades ---
+    '<div class="section"><span>recently diagnosed <span class="hint">· latest fresh grades, newest first</span></span></div>'+
+    '<div class="card">'+((d.recentAccounts||[]).length
+      ? bars(d.recentAccounts.map(a=>({l:'@'+a.handle+' · '+ago(a.at),v:a.overall})),'l','v',v=>v+'%')
+      : '<p class="muted">no account diagnoses yet</p>')+'</div>'+
     // --- details (all-time) ---
     '<div class="section"><span>details <span class="hint">· all time</span></span></div><div class="row grid">'+
       '<div class="card"><h3>Play mix</h3>'+bars(mix.map(m=>({l:m.label+(m.fresh!=null?' ('+m.fresh+' fresh · '+m.cached+' cached in range)':''),v:m.count})),'l','v')+'</div>'+
