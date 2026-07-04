@@ -36,9 +36,23 @@ async function fetchFeed(name, retries = 3) {
         headers: { 'user-agent': UA },
         signal: AbortSignal.timeout(15_000),
       });
-      if (res.status === 404 || res.status === 403) return null;
-      if (res.ok) return await res.text();
-      lastErr = new Error(`reddit rss ${res.status}`);
+      if (res.status === 404) return null;
+      if (res.status === 403) {
+        // Two very different 403s: reddit's bot defense serves an HTML block
+        // page (throttling — retry it), while a suspended account's feed is a
+        // plain 403 (account state — definitive null). Mixing them up tells
+        // users a real account "doesn't exist".
+        const body = await res.text();
+        if (/theme-beta|network security|blocked|<html/i.test(body.slice(0, 500))) {
+          lastErr = new Error('reddit rss blocked (403 throttle)');
+        } else {
+          return null;
+        }
+      } else if (res.ok) {
+        return await res.text();
+      } else {
+        lastErr = new Error(`reddit rss ${res.status}`);
+      }
     } catch (err) {
       lastErr = err;
     }
