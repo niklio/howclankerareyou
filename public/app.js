@@ -38,9 +38,17 @@ async function api(path, body) {
 // entries. navGen invalidates in-flight flows when the user navigates away.
 let navGen = 0;
 
+// Account results get the short, stable share path (/r/handle → that
+// account's latest grade); self-tests keep their UUID path.
+function resultPath(fin) {
+  return fin.subject && fin.subject.type === 'account' && fin.subject.handle
+    ? `/r/${fin.subject.handle}`
+    : `/r/${fin.id}`;
+}
+
 function pushResult(fin, live) {
   try {
-    history.pushState({ view: 'result', fin, live }, '', `/r/${fin.id}`);
+    history.pushState({ view: 'result', fin, live }, '', resultPath(fin));
   } catch {}
   renderResults(fin, live);
 }
@@ -53,7 +61,7 @@ window.addEventListener('popstate', (e) => {
     renderResults(st.fin, !!st.live);
     return;
   }
-  const m = location.pathname.match(/^\/r\/([0-9a-fA-F-]{8,})$/);
+  const m = location.pathname.match(/^\/r\/([A-Za-z0-9_-]{1,64})$/);
   if (m) {
     api(`/api/result/${m[1]}`)
       .then((d) => renderResults(d, false))
@@ -308,7 +316,7 @@ function renderResults(fin, live) {
   const acct = fin.subject && fin.subject.type === 'account';
   const handle = acct ? fin.subject.handle : null;
 
-  const url = fin.id ? `${location.origin}/r/${fin.id}` : location.origin;
+  const url = fin.id ? location.origin + resultPath(fin) : location.origin;
 
   // Headline.
   if (acct) {
@@ -548,7 +556,7 @@ api('/api/status')
   .catch(() => {});
 
 const restored = history.state;
-const shared = location.pathname.match(/^\/r\/([0-9a-fA-F-]{8,})$/);
+const shared = location.pathname.match(/^\/r\/([A-Za-z0-9_-]{1,64})$/);
 if (restored && restored.view === 'result' && restored.fin) {
   // Reload of a result we rendered this session: history.state survives
   // refresh, so the taker keeps their live view (share button and all).
@@ -563,10 +571,16 @@ if (restored && restored.view === 'result' && restored.fin) {
     })
     .catch(() => {
       // Dead share link (expired/removed result): say so instead of silently
-      // dumping the visitor on the homepage.
+      // dumping the visitor on the homepage. If the link names a handle,
+      // prefill it — one click re-runs the diagnosis.
       show('landing');
       const errEl = $('diag-err');
-      errEl.textContent = "that result doesn't exist anymore — diagnose someone fresh instead.";
+      if (/^[A-Za-z0-9_]{1,15}$/.test(shared[1])) {
+        $('diag-input').value = '@' + shared[1];
+        errEl.textContent = 'no grade on file for @' + shared[1] + ' — hit diagnose to make one.';
+      } else {
+        errEl.textContent = "that result doesn't exist anymore — diagnose someone fresh instead.";
+      }
       errEl.hidden = false;
     });
 } else {
