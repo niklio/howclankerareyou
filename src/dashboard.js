@@ -142,13 +142,13 @@ function render(d){
     // --- live feed: latest fresh account grades ---
     '<div class="section"><span>recently diagnosed <span class="hint">· latest fresh grades, newest first</span></span></div>'+
     '<div class="card">'+((d.recentAccounts||[]).length
-      ? bars(d.recentAccounts.map(a=>({l:'@'+a.handle+' · '+ago(a.at),v:a.overall})),'l','v',v=>v+'%')
+      ? bars(d.recentAccounts.map(a=>({l:(a.platform==='reddit'?'u/':'@')+a.handle+' · '+ago(a.at),v:a.overall})),'l','v',v=>v+'%')
       : '<p class="muted">no account diagnoses yet</p>')+'</div>'+
     // --- details (all-time) ---
     '<div class="section"><span>details <span class="hint">· all time</span></span></div><div class="row grid">'+
-      '<div class="card"><h3>Play mix</h3>'+bars(mix.map(m=>({l:m.label+(m.fresh!=null?' ('+m.fresh+' fresh · '+m.cached+' cached in range)':''),v:m.count})),'l','v')+'</div>'+
+      '<div class="card"><h3>Play mix</h3>'+bars(mix.map(m=>({l:m.label,v:m.count})),'l','v')+'</div>'+
       '<div class="card"><h3>Clanker-score distribution (all results)</h3>'+bars(d.scoreHistogram.map(b=>({l:b.bucket+'%',v:b.count})),'l','v')+'</div>'+
-      '<div class="card"><h3>Most-diagnosed accounts</h3>'+((d.topHandles||[]).length?bars(d.topHandles.map(t=>({l:'@'+t.handle+(t.score!=null?' · '+t.score+'%':''),v:t.lookups})),'l','v'):'<p class="muted">no diagnoses yet</p>')+'</div>'+
+      '<div class="card"><h3>Most-diagnosed accounts</h3>'+((d.topHandles||[]).length?bars(d.topHandles.map(t=>({l:(t.handle.indexOf('u/')===0?'':'@')+t.handle+(t.score!=null?' · '+t.score+'%':''),v:t.lookups})),'l','v'):'<p class="muted">no diagnoses yet</p>')+'</div>'+
       '<div class="card"><h3>Diagnose outcomes</h3>'+((d.outcomes||[]).length?bars(d.outcomes,'outcome','count'):'<p class="muted">no diagnoses yet</p>')+'</div>'+
       '<div class="card"><h3>Traffic sources</h3>'+(d.referrers.length?bars(d.referrers,'ref','count'):'<p class="muted">no referrer data yet</p>')+'</div>'+
       '<div class="card"><h3>Self-test question funnel</h3>'+bars(d.funnel.map(f=>({l:'Q'+f.step+' '+f.prompt.slice(0,22)+'…',v:f.sessions})),'l','v')+'</div>'+

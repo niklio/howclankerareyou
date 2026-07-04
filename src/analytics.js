@@ -16,9 +16,10 @@ const COST_PER_CALL = {
   'Qwen/Qwen3-235B-A22B-Instruct-2507:nscale': 60 * 0.2e-6 + 0.6e-6,
 };
 const DEFAULT_COST = 1.1e-5;
-// A fresh diagnosis = 15 echo calls (~60 prompt tokens each at Qwen-235B-class
-// rates) + `pages` twitterapi advanced-search calls. Cached hits cost 0.
-const DIAGNOSE_HF_COST = 15 * 60 * 0.13e-6;
+// A fresh diagnosis = 15 echo calls (3 on the thin fallback), ~60 prompt
+// tokens each at Qwen-235B-class rates, + `pages` twitterapi search calls for
+// X (reddit's RSS is free). Cached hits cost 0.
+const ECHO_CALL_COST = 60 * 0.13e-6;
 const TWITTERAPI_PAGE_COST = 20 * 0.15e-3; // $0.15/1k tweets, 20 tweets/page
 const RANGES = new Set(['day', 'week', 'month', 'all']);
 // results-table population filters (old self-test rows predate subject_type).
@@ -92,7 +93,8 @@ export async function gatherAnalytics(env, range = 'week') {
   const dOut = (p) => `json_extract(meta,'$.${p}')`;
   const dRows = await q(
     `SELECT ${bucket('ts')} d, ${dOut('outcome')} outcome, ${dOut('cached')} cached,
-            ${dOut('msTotal')} ms, ${dOut('pages')} pages
+            ${dOut('msTotal')} ms, ${dOut('pages')} pages,
+            ${dOut('platform')} plat, ${dOut('cause')} cause
      FROM events WHERE type='diagnose' AND ${cond('ts')}`
   );
   const diagAttempts = fillK(aggCount(dRows, () => true));
@@ -118,8 +120,9 @@ export async function gatherAnalytics(env, range = 'week') {
   // the same per-bucket spend map as the self-test calls.
   for (const r of dRows) {
     if (truthy(r.cached)) continue;
-    const pages = Number(r.pages) || 0;
-    const c = (r.outcome === 'success' ? DIAGNOSE_HF_COST : 0) + pages * TWITTERAPI_PAGE_COST;
+    let c = 0;
+    if (r.outcome === 'success') c += (r.cause === 'fallback' ? 3 : 15) * ECHO_CALL_COST;
+    if (r.plat !== 'reddit') c += (Number(r.pages) || 0) * TWITTERAPI_PAGE_COST;
     if (c) spendBy[r.d] = (spendBy[r.d] || 0) + c;
   }
   const spendSeries = keys.map((k) => [k, Math.round((spendBy[k] || 0) * 1e6) / 1e6]);
@@ -169,13 +172,17 @@ export async function gatherAnalytics(env, range = 'week') {
   // One score distribution across all results — a play is a play in the loop
   // view. (Populations are calibrated separately but land on the same 0-100
   // scale; the play-mix card carries the flavor split.)
-  const resultRows = await q(`SELECT overall, per_model, subject_type FROM results`);
+  const resultRows = await q(`SELECT overall, per_model, subject_type, subject_platform FROM results`);
   const hist = Array.from({ length: 10 }, (_, i) => ({ bucket: `${i * 10}-${i * 10 + 10}`, count: 0 }));
   const modelCount = Object.fromEntries(MODELS.map((m) => [m.label, 0]));
-  let allTimeAccounts = 0, allTimeSelf = 0;
+  let allTimeAccountsX = 0, allTimeAccountsReddit = 0, allTimeSelf = 0;
   for (const r of resultRows) {
     hist[Math.min(9, Math.max(0, Math.floor(r.overall / 10)))].count++;
-    if (r.subject_type === 'account') { allTimeAccounts++; continue; } // inner-clanker is a self-test stat
+    if (r.subject_type === 'account') {
+      if (r.subject_platform === 'reddit') allTimeAccountsReddit++;
+      else allTimeAccountsX++;
+      continue; // inner-clanker is a self-test stat
+    }
     allTimeSelf++;
     try {
       const top = JSON.parse(r.per_model).sort((a, b) => b.score - a.score)[0];
@@ -194,8 +201,9 @@ export async function gatherAnalytics(env, range = 'week') {
   // not-english, too-short, placeholder); rows predating the cause field —
   // or whose backfill probe failed — show as 'thin · unclassified'.
   const outcomeRows = await q(
-    `SELECT (CASE WHEN ${dOut('outcome')}='thin'
-       THEN 'thin · ' || COALESCE(${dOut('cause')}, 'unclassified')
+    `SELECT (CASE
+       WHEN ${dOut('outcome')}='thin' THEN 'thin · ' || COALESCE(${dOut('cause')}, 'unclassified')
+       WHEN ${dOut('outcome')}='success' AND ${dOut('cause')}='fallback' THEN 'success · thin-fallback'
        ELSE ${dOut('outcome')} END) o, COUNT(*) n
      FROM events WHERE type='diagnose' GROUP BY o ORDER BY n DESC`
   );
@@ -206,7 +214,9 @@ export async function gatherAnalytics(env, range = 'week') {
   );
   const scoreByHandle = {};
   for (const r of await q(
-    `SELECT lower(subject_handle) h, overall FROM results WHERE ${ACCT_COND} ORDER BY created_at ASC`
+    `SELECT (CASE WHEN COALESCE(subject_platform,'x')='reddit'
+       THEN 'u/' || lower(subject_handle) ELSE lower(subject_handle) END) h, overall
+     FROM results WHERE ${ACCT_COND} ORDER BY created_at ASC`
   ))
     scoreByHandle[r.h] = r.overall; // ASC → last write wins = latest score
   const topHandles = topHandleRows.map((r) => ({
@@ -223,10 +233,10 @@ export async function gatherAnalytics(env, range = 'week') {
   // hits don't create rows, so this is genuinely "new grades").
   const recentAccounts = (
     await q(
-      `SELECT subject_handle h, overall, created_at t FROM results
-       WHERE ${ACCT_COND} ORDER BY created_at DESC LIMIT 15`
+      `SELECT subject_handle h, overall, created_at t, COALESCE(subject_platform,'x') p
+       FROM results WHERE ${ACCT_COND} ORDER BY created_at DESC LIMIT 15`
     )
-  ).map((r) => ({ handle: r.h, overall: r.overall, at: r.t }));
+  ).map((r) => ({ handle: r.h, platform: r.p, overall: r.overall, at: r.t }));
 
   // --- budget (operational: today's cap + month-to-date, range-independent) ---
   const monthStart = today().slice(0, 8) + '01';
@@ -279,7 +289,8 @@ export async function gatherAnalytics(env, range = 'week') {
       { label: 'Estimated spend ($)', series: spendSeries },
     ],
     playMix: [
-      { label: 'diagnose an account', count: allTimeAccounts, cached: diagCachedN, fresh: diagFreshN },
+      { label: 'diagnose an X account', count: allTimeAccountsX },
+      { label: 'diagnose a redditor', count: allTimeAccountsReddit },
       { label: 'self-test', count: allTimeSelf },
     ],
     diagnoseSuccessRate: totalDiagAttempts
