@@ -43,9 +43,10 @@ async function api(env, path, params, retries = 4) {
       });
       throttled = res.status === 429;
       const data = await res.json().catch(() => null);
-      // Success shape: { status:'success', code, msg, data, has_next_page,
-      // next_cursor }. Throttle/error shape: { error, message }.
-      if (!throttled && data && (data.status === 'success' || data.data)) return data;
+      // Success shapes vary by endpoint: user/last_tweets wrap payloads as
+      // { status:'success', data, … } while advanced_search returns a bare
+      // { tweets, has_next_page, next_cursor }. Throttle/error: { error, message }.
+      if (!throttled && data && (data.status === 'success' || data.data || data.tweets)) return data;
       lastErr = new Error(data?.message || data?.msg || `twitterapi ${res.status}`);
       // Definitive answers aren't transient — don't burn retries on them:
       // status:'error' = the API resolved the request (e.g. "user not found");
