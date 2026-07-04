@@ -105,43 +105,46 @@ const RLABEL={day:'· last 24 hours, hourly',week:'· last 7 days, daily',month:
 function render(d){
   const stat=(big,lab,sub)=>'<div class="card stat"><div class="big">'+big+'</div><div class="sub">'+lab+(sub?' · '+sub:'')+'</div></div>';
   const h=d.headline, tail=d.range==='day'?' today':'';
-  // Latency plots annotate with the range max (summing percentiles is nonsense).
-  const plotCards=d.plots.map(p=>{
+  const plot=(p)=>{
     const isLat=p.label.indexOf('latency')>=0;
     const agg=isLat?('max '+fmt(Math.max(0,...p.series.map(x=>x[1])))+'ms'):(fmt(sum(p.series))+tail);
     return '<div class="card"><h3>'+esc(p.label)+' <span style="color:var(--ink)">· '+agg+'</span></h3>'+lineChart(p.series)+'</div>';
-  }).join('');
+  };
   const budgetPct=Math.min(100,d.budget.capPct);
   const rangeBtns=['day','week','month','all'].map(r=>'<button data-r="'+r+'"'+(r===d.range?' class="active"':'')+'>'+r+'</button>').join('');
-  const cta=d.cta||{};
+  const mix=d.playMix||[];
   document.getElementById('app').innerHTML=
     '<header><h1>clanker · analytics</h1><div class="right">'+
       '<div class="range" id="range">'+rangeBtns+'</div>'+
       '<span class="who">'+esc(EMAIL)+' · <a href="https://howclankerareyou.com/auth/logout?next='+encodeURIComponent(location.href)+'">sign out</a></span>'+
     '</div></header>'+
     '<main>'+
+    // --- the loop: one funnel, one K ---
     '<div class="row stats">'+
-      stat(h.diagnoses,'diagnoses',h.diagnosesFresh+' fresh · '+h.diagnosesCached+' cached')+
-      stat(h.diagnoseSuccessRate+'%','diagnose success','of attempts')+
-      stat(h.completedRuns,'self-tests','completed')+
-      stat(h.shareRate+'%','share rate','of all results')+
-      stat(h.kFactor,'k-factor','opens per share')+
+      stat(h.kViral,'K (viral coeff.)','plays a play generates; >1 = flywheel')+
+      stat(h.plays,'plays',h.playsAccount+' account · '+h.playsSelf+' self')+
+      stat(h.playRate+'%','play rate','of unique visitors')+
+      stat(h.shareRate+'%','share rate','of plays')+
+      stat(h.opensPerShare,'opens / share')+
       stat('$'+h.spend,'spend')+
     '</div>'+
-    '<div class="card"><h3>HF budget — '+d.budget.todayCalls+' / '+d.budget.dailyCap+' calls today ('+d.budget.capPct+'% of daily cap) · $'+d.budget.mtdSpend+' MTD self-test · '+(d.budget.twitterPagesToday||0)+' twitterapi pages today</h3><div class="budget"><div style="width:'+budgetPct+'%"></div></div></div>'+
-    '<div class="section"><span>trends <span class="hint">'+(RLABEL[d.range]||'')+'</span></span></div><div class="row grid">'+plotCards+'</div>'+
-    '<div class="section"><span>breakdowns <span class="hint">· all time</span></span></div><div class="row grid">'+
-      '<div class="card"><h3>Diagnose outcomes</h3>'+((d.outcomes||[]).length?bars(d.outcomes,'outcome','count'):'<p class="muted">no diagnoses yet</p>')+'</div>'+
+    '<div class="card"><h3>The loop — visitor → play → share → open → replay</h3>'+
+      bars((d.loop||[]).map(s=>({l:s.stage,v:s.n})),'l','v')+'</div>'+
+    '<div class="section"><span>loop trends <span class="hint">'+(RLABEL[d.range]||'')+'</span></span></div>'+
+    '<div class="row grid">'+d.plots.map(plot).join('')+'</div>'+
+    // --- health: is the machine serving the loop OK ---
+    '<div class="section"><span>health <span class="hint">'+(RLABEL[d.range]||'')+' · diagnose success '+d.diagnoseSuccessRate+'% · self-test completion '+d.selfCompletionRate+'%</span></span></div>'+
+    '<div class="card"><h3>HF budget — '+d.budget.todayCalls+' / '+d.budget.dailyCap+' calls today ('+d.budget.capPct+'% of daily cap) · '+(d.budget.twitterPagesToday||0)+' twitterapi pages today</h3><div class="budget"><div style="width:'+budgetPct+'%"></div></div></div>'+
+    '<div class="row grid">'+(d.healthPlots||[]).map(plot).join('')+'</div>'+
+    // --- details (all-time) ---
+    '<div class="section"><span>details <span class="hint">· all time</span></span></div><div class="row grid">'+
+      '<div class="card"><h3>Play mix</h3>'+bars(mix.map(m=>({l:m.label+(m.fresh!=null?' ('+m.fresh+' fresh · '+m.cached+' cached in range)':''),v:m.count})),'l','v')+'</div>'+
+      '<div class="card"><h3>Clanker-score distribution (all results)</h3>'+bars(d.scoreHistogram.map(b=>({l:b.bucket+'%',v:b.count})),'l','v')+'</div>'+
       '<div class="card"><h3>Most-diagnosed accounts</h3>'+((d.topHandles||[]).length?bars(d.topHandles.map(t=>({l:'@'+t.handle+(t.score!=null?' · '+t.score+'%':''),v:t.lookups})),'l','v'):'<p class="muted">no diagnoses yet</p>')+'</div>'+
-      '<div class="card"><h3>Account score distribution</h3>'+bars((d.accountHistogram||[]).map(b=>({l:b.bucket+'%',v:b.count})),'l','v')+'</div>'+
-      '<div class="card"><h3>Human score distribution (self-test)</h3>'+bars(d.scoreHistogram.map(b=>({l:b.bucket+'%',v:b.count})),'l','v')+'</div>'+
-      '<div class="card"><h3>Result-page CTA clicks</h3>'+bars([
-        {l:'diagnose someone else',v:cta.diag_again||0},
-        {l:'take the test yourself',v:cta.self_instead||0},
-        {l:'take the test (self share)',v:cta.take_test||0}],'l','v')+'</div>'+
-      '<div class="card"><h3>Funnel — sessions reaching each question</h3>'+bars(d.funnel.map(f=>({l:'Q'+f.step+' '+f.prompt.slice(0,22)+'…',v:f.sessions})),'l','v')+'</div>'+
-      '<div class="card"><h3>Inner-clanker model (self-test)</h3>'+bars(d.modelShare,'label','count')+'</div>'+
+      '<div class="card"><h3>Diagnose outcomes</h3>'+((d.outcomes||[]).length?bars(d.outcomes,'outcome','count'):'<p class="muted">no diagnoses yet</p>')+'</div>'+
       '<div class="card"><h3>Traffic sources</h3>'+(d.referrers.length?bars(d.referrers,'ref','count'):'<p class="muted">no referrer data yet</p>')+'</div>'+
+      '<div class="card"><h3>Self-test question funnel</h3>'+bars(d.funnel.map(f=>({l:'Q'+f.step+' '+f.prompt.slice(0,22)+'…',v:f.sessions})),'l','v')+'</div>'+
+      '<div class="card"><h3>Inner-clanker model (self-test)</h3>'+bars(d.modelShare,'label','count')+'</div>'+
       '<div class="card"><h3>Most→least clanker question (avg surprisal, nats)</h3>'+bars(d.questionClanker.map(q=>({l:q.prompt.slice(0,30),v:q.avgKl})),'l','v',v=>v.toFixed(1))+'</div>'+
     '</div>'+
     '<p class="muted" style="margin-top:20px">updated '+new Date(d.updated).toLocaleString()+'</p>'+
