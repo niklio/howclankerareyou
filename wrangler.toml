@@ -108,10 +108,5 @@ type = "ratelimit"
 namespace_id = "2003"
 simple = { limit = 6, period = 60 }   # per-IP Twitter diagnoses / minute (costly)
 
-# Self-referencing service binding: the diagnose fan-out dispatches each
-# (post × model) pair to a sub-invocation so its parallel scoring calls get
-# their own simultaneous-connection budget (a single invocation caps at ~6).
-# On cutover, add the same binding at top level pointing at "howclankerareyou".
-[[env.staging.services]]
-binding = "SELF"
-service = "howclankerareyou-staging"
+# (The former scorer-worker fan-out was removed 2026-07-04: echo scoring needs
+# only 15 upstream calls per diagnosis, which fit one invocation comfortably.)

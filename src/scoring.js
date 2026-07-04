@@ -27,16 +27,28 @@ const ROUTER = 'https://router.huggingface.co/v1/chat/completions';
 // model's own output, so anchoring at self alone made any non-panel LLM score
 // only ~50%. Provider pins lock a backend that returns top-20 logprobs and
 // accepts an assistant-prefixed continuation.
-// d0     — anchor for the anchored self-test (sentence completion).
-// d0text — anchor for free-form post scoring (see TEXT_PRIME); higher because
-//          an unanchored post is more surprising token-for-token than a
-//          completion continuing a shared stem. Calibrated 2026-07-03 on AI
-//          vs human sample posts across all three models.
 export const MODELS = [
-  { id: 'meta-llama/Llama-3.1-8B-Instruct:nscale', label: 'Llama 3.1 8B', maker: 'Meta', d0: 5.7, d0text: 6.2 },
-  { id: 'deepseek-ai/DeepSeek-V3-0324:novita', label: 'DeepSeek V3', maker: 'DeepSeek', d0: 4.2, d0text: 5.0 },
-  { id: 'Qwen/Qwen3-235B-A22B-Instruct-2507:nscale', label: 'Qwen3 235B', maker: 'Alibaba', d0: 7.7, d0text: 8.0 },
+  { id: 'meta-llama/Llama-3.1-8B-Instruct:nscale', label: 'Llama 3.1 8B', maker: 'Meta', d0: 5.7 },
+  { id: 'deepseek-ai/DeepSeek-V3-0324:novita', label: 'DeepSeek V3', maker: 'DeepSeek', d0: 4.2 },
+  { id: 'Qwen/Qwen3-235B-A22B-Instruct-2507:nscale', label: 'Qwen3 235B', maker: 'Alibaba', d0: 7.7 },
 ];
+
+// Account-diagnosis panel (separate from the self-test panel above): the only
+// HF-router-reachable models whose serving stack supports `echo` + logprobs on
+// the completions endpoint — one call returns the exact logprob of every token
+// in a post (audited all 28 deepinfra text-gen models, 2026-07-04; every Llama
+// and DeepSeek deployment 500s on that path). One provider-direct call per
+// (post × model) replaces the old 8-40 chat calls: ~10× faster and cheaper,
+// and exact (no top-20 truncation/floor).
+// d0text — anchor (nats/word over the scored window): at or below it scores
+// ~100% clanker. Calibrated 2026-07-04 on the 8-account panel via Qwen
+// (BillGates 2.06 ↔ ~85%, sama 5.01 ↔ ~20%).
+export const TEXT_MODELS = [
+  { id: 'Qwen/Qwen3-235B-A22B-Instruct-2507', label: 'Qwen3 235B', maker: 'Alibaba', d0text: 1.7 },
+  { id: 'stepfun-ai/Step-3.5-Flash', label: 'Step 3.5 Flash', maker: 'StepFun', d0text: 1.7 },
+  { id: 'Qwen/Qwen3-235B-A22B-Thinking-2507', label: 'Qwen3 Thinking', maker: 'Alibaba', d0text: 1.7 },
+];
+const ECHO_URL = 'https://router.huggingface.co/deepinfra/v1/openai/completions';
 
 export function isMock(env) {
   return env.MOCK_INFERENCE === '1' || !env.HF_TOKEN;
@@ -53,17 +65,10 @@ const FLOOR_MIN = -14;
 
 // --- free-form text scoring (the "diagnose an X account" feature) -----------
 // The self-test scores a sentence *completion* anchored by a shared stem. A
-// tweet has no stem, so we frame the model as composing a post from scratch and
-// walk the real text token-by-token. Empirically the AI↔human surprisal gap on
-// a single unanchored post is smaller than on an anchored completion, but it
-// averages out over many posts, and the free-form d0/λ below are calibrated for
-// this regime (see scoreText). Longer step budget since posts run past a stem.
-const TEXT_PRIME =
-  `Write a single short, natural social media post. ` +
-  `Plain text only, no quotation marks, no hashtags.`;
-// Fallback step budget; the diagnose endpoint passes an explicit cap
-// (DROP_K + GRID_COLS = 18) so per-post compute is fixed.
-const MAX_STEPS_TEXT = 45;
+// tweet has no stem, so its surprisal is the plain LM probability of the text
+// itself, taken from a single echo call per (post × model). The scored window
+// is the post's LAST `window` words — everything before is conditioning
+// context, which is the cold-start drop for free.
 
 // Re-anchored 2026-07-03 so any-LLM paste scores high: with the generic-LLM d0
 // above and overall = nearest-model similarity, frontier-LLM completions land
@@ -76,10 +81,11 @@ export function clankerScore(avgKL, d0) {
   return Math.round(1000 * Math.exp(-Math.max(0, avgKL - d0) / LAMBDA)) / 10;
 }
 
-// Free-form posts separate less per-token than anchored completions, so the
-// free-form curve is gentler (smaller λ would over-punish the small AI↔human
-// gap into all-or-nothing). Calibrated alongside d0text.
-const LAMBDA_TEXT = 1.1;
+// Exact full-context word surprisals run lower and tighter than the old
+// top-20-walk numbers, so the curve is re-fit for that scale: with d0text=1.7,
+// λ=2.0 puts the calibration panel at BillGates(2.06)→84%, pmarca(3.17)→48%,
+// dril(4.13)→30%, sama(5.01)→19%. Calibrated alongside d0text.
+const LAMBDA_TEXT = 2.0;
 
 export function clankerScoreText(avgKL, d0text) {
   return Math.round(1000 * Math.exp(-Math.max(0, avgKL - d0text) / LAMBDA_TEXT)) / 10;
@@ -95,52 +101,88 @@ export async function scoreModel(env, model, promptText, completion) {
   });
 }
 
-// Free-form post: no stem. The model is primed to compose a post (TEXT_PRIME)
-// and we walk the real post text from an empty prefix. Same greedy machinery,
-// empty seed. Callers cap maxSteps (drop window + scored window) so a long
-// post costs the same as a short one.
-export async function scoreText(env, model, text, maxSteps = MAX_STEPS_TEXT) {
-  return walk(env, model.id, TEXT_PRIME, text, { maxSteps, seed: '' });
+// Echo scorer: ONE completions call returns the exact logprob of every token
+// in the post (echo=true + logprobs). Tokens are rolled up into per-word
+// surprisals via text_offset, and the post's last `window` words become the
+// scored window (perStep, one entry per word — logprob is the word's mean
+// token logprob, so downstream -logprob math is unchanged). deepinfra
+// occasionally answers 429 "engine_overloaded"; retries back off and the
+// caller treats null as a missing panel member.
+export async function scorePostEcho(env, model, text, window = 8, retries = 3) {
+  if (isMock(env)) return mockEcho(model.id, text, window);
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(ECHO_URL, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${env.HF_TOKEN}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: model.id,
+          prompt: text,
+          max_tokens: 1, // provider rejects 0; the 1 generated token is sliced off below
+          echo: true,
+          logprobs: 1,
+        }),
+        signal: AbortSignal.timeout(25_000),
+      });
+      if (!res.ok) throw new Error(`echo ${res.status}`);
+      const data = await res.json();
+      const lp = data.choices?.[0]?.logprobs;
+      if (!lp?.tokens?.length || !lp.token_logprobs || !lp.text_offset) {
+        throw new Error('no prompt logprobs in response');
+      }
+
+      // Word spans over the post; each word's surprisal is the mean -logprob
+      // of the prompt tokens overlapping it (the generated tail — offsets at
+      // or past the prompt's end — is excluded, as is the first token, whose
+      // logprob is null).
+      const words = [];
+      for (const m of String(text).matchAll(/\S+/g)) {
+        words.push({ chunk: m[0], start: m.index, end: m.index + m[0].length, lps: [] });
+      }
+      for (let i = 0; i < lp.tokens.length; i++) {
+        const logprob = lp.token_logprobs[i];
+        const off = lp.text_offset[i];
+        if (logprob == null || off >= text.length) continue;
+        const end = off + lp.tokens[i].length;
+        for (const w of words) if (w.start < end && w.end > off) w.lps.push(logprob);
+      }
+
+      const scored = words.slice(-window);
+      const perStep = scored.map((w) =>
+        w.lps.length
+          ? { chunk: w.chunk, logprob: round(w.lps.reduce((a, b) => a + b, 0) / w.lps.length) }
+          : null
+      );
+      const kept = perStep.filter(Boolean);
+      if (!kept.length) throw new Error('no scored words');
+      const avgKL = round(-kept.reduce((s, t) => s + t.logprob, 0) / kept.length);
+      return { avgKL, steps: kept.length, perStep };
+    } catch (err) {
+      console.log(`scorePostEcho ${model.id} attempt ${attempt}: ${err}`);
+      if (attempt < retries) await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
+    }
+  }
+  return null;
 }
 
-// Fast free-form scorer: score the post's last `count` words CONCURRENTLY
-// instead of walking tokens sequentially. Each word's conditioning prefix
-// (everything before it) is known upfront, so there is no chain — one round
-// trip of `count` parallel calls replaces up to 18 serial ones. A word's
-// surprisal is the logprob of the best top-20 candidate that prefixes the
-// remaining text at that point (its first token), floored when outside the
-// top-20 — same matching and floor rules as the walk. Everything before the
-// window is warmup context (≥3 words via the sampling minimum), which buys
-// the old DROP_K cold-start correction for free: unissued calls cost nothing.
-export async function scoreWordWindow(env, model, text, count = 8) {
-  const words = String(text).trim().split(/\s+/).filter(Boolean);
+// Deterministic stand-in for demo mode: pseudo-surprisal from a word hash,
+// same output shape as scorePostEcho.
+function mockEcho(modelId, text, window) {
+  const words = String(text).trim().split(/\s+/).filter(Boolean).slice(-window);
   if (!words.length) return null;
-  const start = Math.max(0, words.length - count);
-
-  const perStep = await Promise.all(
-    words.slice(start).map(async (word, i) => {
-      const pos = start + i;
-      const prefix = words.slice(0, pos).join(' ');
-      const cands = await topLogprobs(env, model.id, TEXT_PRIME, prefix);
-      if (!cands) return null;
-      const remaining = ' ' + words.slice(pos).join(' ');
-      const match = bestMatch(cands, remaining, 1); // no first-letter forgiveness
-      let logprob;
-      if (match) {
-        logprob = match.logprob;
-      } else {
-        const minLp = Math.min(...cands.map((c) => c.logprob));
-        logprob = Math.max(FLOOR_MIN, minLp - FLOOR_MARGIN);
-      }
-      return { chunk: word, logprob: round(logprob), matched: !!match };
-    })
-  );
-
-  const kept = perStep.filter(Boolean);
-  if (!kept.length) return null;
-  const avgKL = round(-kept.reduce((s, t) => s + t.logprob, 0) / kept.length);
-  // perStep keeps positional nulls so grid cells stay word-aligned.
-  return { avgKL, steps: kept.length, perStep };
+  const perStep = words.map((w) => {
+    let h = 0x811c9dc5;
+    for (const c of modelId + '|' + w) {
+      h ^= c.charCodeAt(0);
+      h = Math.imul(h, 0x01000193);
+    }
+    return { chunk: w, logprob: -round(0.3 + ((h >>> 0) % 600) / 100) };
+  });
+  const avgKL = round(-perStep.reduce((s, t) => s + t.logprob, 0) / perStep.length);
+  return { avgKL, steps: perStep.length, perStep };
 }
 
 // Greedy top-20 token walk shared by both scorers. `userMsg` is the fixed user
@@ -206,15 +248,16 @@ export function heatLevel(kl) {
   return 3;
 }
 
-// Same idea for free-form post tokens, shifted for that regime: unanchored
-// text runs ~2.5 nats hotter than a stem-anchored completion (the d0→d0text
-// shift), so the self-test buckets paint every account green. These buckets
-// center on the observed account range (avgKL ~5–10).
+// Same idea for free-form post words, on the exact-echo scale: full-context
+// word surprisals run much lower than the old top-20-walk numbers. Buckets
+// sit near the calibration panel's word-surprisal quartiles (p25 0.94 /
+// p50 2.9 / p75 4.9), so grids average one of each color instead of washing
+// out to a single hue.
 export function heatLevelText(kl) {
   if (kl == null) return null;
-  if (kl < 4.5) return 0;
-  if (kl < 6.5) return 1;
-  if (kl < 8.5) return 2;
+  if (kl < 1.0) return 0;
+  if (kl < 3.0) return 1;
+  if (kl < 5.0) return 2;
   return 3;
 }
 

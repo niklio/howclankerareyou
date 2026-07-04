@@ -106,7 +106,7 @@ function showGather(handle) {
   scan[1].className = 'wait';
   scan[1].textContent = '⋯ pulling their 5 most recent posts (retweets & replies excluded)';
   scan[2].className = 'wait';
-  scan[2].textContent = '⋯ scoring word-by-word vs Llama · DeepSeek · Qwen3';
+  scan[2].textContent = '⋯ scoring word-by-word against the model panel';
   const fill = $('gather-fill');
   fill.style.width = '5%';
   show('gather');
@@ -258,12 +258,10 @@ function renderResults(fin, live) {
 
   // Headline.
   if (acct) {
-    const kept = fin.subject.kept || (fin.grid ? fin.grid.length : null);
     const cachedNote = fin.cached ? ' · graded earlier this week' : '';
     $('res-context').innerHTML =
-      (kept
-        ? `graded from ${kept} public posts on X · <a href="https://x.com/${esc(handle)}" target="_blank" rel="noopener" style="color:var(--accent)">@${esc(handle)}</a>`
-        : `graded from public posts on X · @${esc(handle)}`) + cachedNote;
+      `graded from public posts on X · <a href="https://x.com/${esc(handle)}" target="_blank" rel="noopener" style="color:var(--accent)">@${esc(handle)}</a>` +
+      cachedNote;
     $('res-score').textContent = `${fin.overall}%`;
     $('res-score').previousSibling.textContent = `@${handle} is `;
     $('res-verdict').textContent = ACCOUNT_VERDICTS.find(([min]) => fin.overall >= min)[1];
@@ -356,7 +354,7 @@ function wireResultButtons(fin, grid, url, live, acct) {
 
   if (acct) {
     // Account result: share the finding, then diagnose someone else / take the
-    // test yourself. Opt-out is always offered.
+    // test yourself. (Opt-out is server-side only: /api/remove.)
     if (live && hasGrid) {
       share.hidden = false;
       share.onclick = () => shareResult(fin, grid, url, acct);
@@ -368,10 +366,6 @@ function wireResultButtons(fin, grid, url, live, acct) {
     selfInstead.hidden = false;
     selfInstead.onclick = () => (location.href = '/#self');
     optout.hidden = false;
-    $('link-optout').onclick = (e) => {
-      e.preventDefault();
-      optoutHandle(fin.subject.handle);
-    };
     return;
   }
 
@@ -390,17 +384,6 @@ function wireResultButtons(fin, grid, url, live, acct) {
   } else {
     take.hidden = false;
     take.onclick = () => (location.href = '/');
-  }
-}
-
-async function optoutHandle(handle) {
-  if (!confirm(`Remove @${handle} from this tool? This deletes the result and blocks future diagnoses of this account.`))
-    return;
-  try {
-    await api('/api/remove', { handle });
-    $('res-optout').innerHTML = 'removed — this account can no longer be diagnosed here.';
-  } catch (err) {
-    flash($('link-optout'), 'failed, try again');
   }
 }
 
@@ -492,7 +475,14 @@ const shared = location.pathname.match(/^\/r\/([0-9a-fA-F-]{8,})$/);
 if (shared) {
   api(`/api/result/${shared[1]}`)
     .then((d) => renderResults(d, false))
-    .catch(() => show('landing'));
+    .catch(() => {
+      // Dead share link (expired/removed result): say so instead of silently
+      // dumping the visitor on the homepage.
+      show('landing');
+      const errEl = $('diag-err');
+      errEl.textContent = "that result doesn't exist anymore — diagnose someone fresh instead.";
+      errEl.hidden = false;
+    });
 } else {
   show('landing');
   // Deep-link to the self-test (from "take it again" / "take the test yourself").

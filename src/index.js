@@ -1,8 +1,9 @@
 import { QUESTIONS } from './questions.js';
 import {
   MODELS,
+  TEXT_MODELS,
   scoreModel,
-  scoreWordWindow,
+  scorePostEcho,
   clankerScore,
   clankerScoreText,
   isMock,
@@ -220,21 +221,6 @@ async function api(request, env, url, ctx) {
     return json({ mock: isMock(env) });
   }
 
-  // Internal scorer for the diagnose fan-out: one (post × model) pair per
-  // sub-invocation, so each pair's GRID_COLS parallel calls get their own
-  // Workers connection budget instead of queueing behind the parent's. Only
-  // reachable with the internal key (derived from HF_TOKEN; never leaves CF —
-  // requests arrive via the SELF service binding).
-  if (request.method === 'POST' && pathname === '/api/_score') {
-    if (!env.HF_TOKEN || request.headers.get('x-internal-key') !== internalKey(env)) {
-      return json({ error: 'not found' }, 404);
-    }
-    const body = await request.json().catch(() => ({}));
-    const model = MODELS.find((m) => m.id === body.model);
-    if (!model || typeof body.text !== 'string') return json({ error: 'bad request' }, 400);
-    const r = await scoreWordWindow(env, model, body.text, GRID_COLS);
-    return json({ r });
-  }
 
   // TEMPORARY latency bench (staging only: BENCH var unset in prod → 404).
   // Fires n parallel single-token logprob calls at the HF router to measure
@@ -452,6 +438,7 @@ async function api(request, env, url, ctx) {
       return json({ error: 'the robots are resting — daily limit reached, try again tomorrow', code: 'cap' }, 429);
     }
 
+    const t0 = Date.now();
     // One advanced-search call returns the account's original posts + author
     // metadata together (no user/info round-trip, no timeline pagination in
     // the common case). getUser runs only on the empty-result sad path to
@@ -487,20 +474,20 @@ async function api(request, env, url, ctx) {
       );
     }
 
-    // Score every (post × model) pair. Each pair is GRID_COLS parallel
-    // word-window calls with no sequential chain. When the SELF service
-    // binding exists, each pair runs in its own sub-invocation so its calls
-    // don't queue behind this invocation's 6-connection cap; otherwise score
-    // in-process (correct, just slower).
+    const tFetch = Date.now() - t0;
+
+    // Score every (post × model) pair: one echo call each, all in parallel —
+    // 15 calls total, no chains, well inside the Worker's connection budget.
     const jobs = [];
-    for (const t of samples) for (const m of MODELS) jobs.push({ t, m });
+    for (const t of samples) for (const m of TEXT_MODELS) jobs.push({ t, m });
     const scored = await Promise.all(
-      jobs.map(async ({ t, m }) => ({ t, m, r: await scoreOne(env, m, t.text) }))
+      jobs.map(async ({ t, m }) => ({ t, m, r: await scorePostEcho(env, m, t.text, GRID_COLS) }))
     );
+    const tScore = Date.now() - t0 - tFetch;
 
     // Reconcile the usage counter with the real number of scoring calls made
     // (overDailyCap already charged 1 above).
-    ctx?.waitUntil?.(addUsage(env, jobs.length * GRID_COLS - 1));
+    ctx?.waitUntil?.(addUsage(env, jobs.length - 1));
 
     // Aggregate per model: mean word surprisal over each post's scored window.
     const byId = {}; // tweetId -> modelId -> result
@@ -508,7 +495,7 @@ async function api(request, env, url, ctx) {
       if (!r) continue;
       (byId[t.id] ||= {})[m.id] = r;
     }
-    const perModel = MODELS.map((m) => {
+    const perModel = TEXT_MODELS.map((m) => {
       let sumSurpr = 0, sumTok = 0, posts = 0;
       for (const t of samples) {
         const r = byId[t.id]?.[m.id];
@@ -539,24 +526,28 @@ async function api(request, env, url, ctx) {
     const grid = buildDiagnoseGrid(samples, byId, user.handle);
     const sources = samples.map((t) => ({ id: t.id, text: t.text }));
 
+    // Persist off the critical path — the row lands in ~50ms, long before a
+    // share link could plausibly be opened.
     const id = crypto.randomUUID();
-    await env.DB.prepare(
-      `INSERT INTO results (id, created_at, overall, per_model, grid, subject_type, subject_handle, subject_name, sources)
-       VALUES (?, ?, ?, ?, ?, 'account', ?, ?, ?)`
-    )
-      .bind(
-        id,
-        Date.now(),
-        overall,
-        JSON.stringify(perModel),
-        JSON.stringify(grid),
-        user.handle,
-        user.name,
-        JSON.stringify(sources)
+    ctx?.waitUntil?.(
+      env.DB.prepare(
+        `INSERT INTO results (id, created_at, overall, per_model, grid, subject_type, subject_handle, subject_name, sources)
+         VALUES (?, ?, ?, ?, ?, 'account', ?, ?, ?)`
       )
-      .run();
+        .bind(
+          id,
+          Date.now(),
+          overall,
+          JSON.stringify(perModel),
+          JSON.stringify(grid),
+          user.handle,
+          user.name,
+          JSON.stringify(sources)
+        )
+        .run()
+    );
 
-    return json({
+    const out = {
       id,
       overall,
       perModel,
@@ -572,7 +563,9 @@ async function api(request, env, url, ctx) {
         kept: counts.kept,
         words: counts.words,
       },
-    });
+    };
+    if (env.BENCH === '1') out.debug = { tFetch, tScore, tTotal: Date.now() - t0 };
+    return json(out);
   }
 
   // Opt-out: remove an account from the tool. Blocks future diagnoses and
@@ -666,14 +659,14 @@ function buildDiagnoseGrid(samples, byId, handle) {
     if (!perModel) continue;
     const cells = [];
     for (let j = 0; j < GRID_COLS; j++) {
-      const vals = MODELS.map((m) => perModel[m.id]?.perStep?.[j])
+      const vals = TEXT_MODELS.map((m) => perModel[m.id]?.perStep?.[j])
         .filter(Boolean)
         .map((s) => -s.logprob);
       cells.push(vals.length ? heatLevelText(vals.reduce((a, b) => a + b, 0) / vals.length) : null);
     }
     // Per-post surprisal over the scored window so the share page can rank
     // most- vs least-clanker posts (consistent with the headline aggregation).
-    const kls = MODELS.map((m) => {
+    const kls = TEXT_MODELS.map((m) => {
       const kept = (perModel[m.id]?.perStep || []).filter(Boolean);
       if (!kept.length) return null;
       return -kept.reduce((s, p) => s + p.logprob, 0) / kept.length;
@@ -684,31 +677,6 @@ function buildDiagnoseGrid(samples, byId, handle) {
   return grid;
 }
 
-// Score one (post × model) pair. Prefer dispatching to a sub-invocation via
-// the SELF service binding — each sub-invocation gets its own simultaneous-
-// connection budget, so all pairs' calls truly run concurrently (~1 round
-// trip total). Falls back to scoring in-process when the binding is absent
-// or the dispatch fails (correct, just slower).
-async function scoreOne(env, model, text) {
-  if (env.SELF) {
-    try {
-      const res = await env.SELF.fetch('https://internal/api/_score', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-internal-key': internalKey(env) },
-        body: JSON.stringify({ model: model.id, text }),
-      });
-      if (res.ok) return (await res.json()).r;
-    } catch {}
-  }
-  return scoreWordWindow(env, model, text, GRID_COLS);
-}
-
-// Shared secret for the internal fan-out route: derived from HF_TOKEN, which
-// both sides hold and outside callers don't. Travels only over the service
-// binding (never leaves Cloudflare).
-function internalKey(env) {
-  return 'ik_' + String(env.HF_TOKEN || '').slice(-24);
-}
 
 // Add `n` to today's global call counter, returning the new total (or null on
 // error). Fail-open everywhere: a counter glitch must never take scoring down.
