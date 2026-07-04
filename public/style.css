@@ -35,6 +35,28 @@ main {
   padding: 7vh 24px 40px;
 }
 
+/* ---- always-visible SEO / about content ---- */
+.about {
+  width: 100%;
+  max-width: 680px;
+  margin: 0 auto;
+  padding: 24px 24px 8px;
+  border-top: 1px solid var(--line);
+  font-size: 14px;
+}
+.about h2 {
+  font-family: "Orbitron", sans-serif;
+  font-size: 15px;
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
+  margin: 26px 0 8px;
+}
+.about h2:first-child { margin-top: 4px; }
+.about p { margin: 0 0 12px; color: var(--fg); }
+.about .faq { margin: 8px 0 0; }
+.about .faq dt { font-weight: 600; margin: 16px 0 4px; }
+.about .faq dd { margin: 0; color: var(--dim); }
+
 footer { padding: 20px 24px 30px; text-align: center; font-size: 12px; color: var(--dim); }
 footer a { color: var(--accent); text-decoration: none; font-weight: 600; }
 footer a:hover { text-decoration: underline; }

@@ -3,8 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>how clanker are you? — a reverse Turing test</title>
-  <meta name="description" content="Drop an @handle — we pull their recent posts and measure the surprisal of their writing under AI models to score how clanker (AI-like) they are. Or finish a few sentences and diagnose yourself.">
+  <title>how clanker are you? — the clanker test</title>
+  <meta name="description" content="Take the clanker test: drop an @handle or finish five sentences and we grade how AI-like (clanker) the writing reads to the machines. A reverse Turing test — find out if you're a clanker.">
+  <meta name="keywords" content="clanker, clanker test, am I a clanker, clanker meaning, clanker detector, AI writing detector, reverse Turing test, cogsucker">
   <link rel="canonical" href="https://howclankerareyou.com/">
   <meta name="theme-color" content="#f2efe6">
 
@@ -20,7 +21,7 @@
   <meta property="og:site_name" content="how clanker are you?">
   <meta property="og:url" content="https://howclankerareyou.com/">
   <meta property="og:title" content="how clanker are you?">
-  <meta property="og:description" content="A surprisal Turing test: drop any @handle and we grade how clanker (AI-like) their posts read to the machines — or finish a few sentences and diagnose yourself.">
+  <meta property="og:description" content="The clanker test: drop any @handle and we grade how clanker (AI-like) their posts read to the machines — or finish five sentences and diagnose yourself. A reverse Turing test.">
   <meta property="og:image" content="https://howclankerareyou.com/og.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
@@ -38,11 +39,62 @@
     "@context": "https://schema.org",
     "@type": "WebApplication",
     "name": "how clanker are you?",
+    "alternateName": ["clanker test", "am I a clanker", "clanker detector"],
     "url": "https://howclankerareyou.com/",
-    "description": "A surprisal Turing test: grade how AI-like any X account's posts read to language models, or diagnose your own writing.",
+    "description": "The clanker test: a reverse Turing test that grades how AI-like (clanker) any X account's posts — or your own writing — read to language models.",
     "applicationCategory": "GameApplication",
     "operatingSystem": "Any",
+    "browserRequirements": "Requires JavaScript.",
+    "keywords": "clanker, clanker test, am I a clanker, AI writing detector, reverse Turing test",
     "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    "mainEntity": [
+      {
+        "@type": "Question",
+        "name": "What does \"clanker\" mean?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Clanker is slang for a robot or AI, borrowed from Star Wars. In 2025 it became internet shorthand for anything that sounds machine-made — including AI-generated writing. To call text clanker is to say it reads like a language model wrote it."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "Am I a clanker?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Take the clanker test to find out. If your writing is highly predictable to language models — low surprisal — you score high. Em-dashes, the word \"delve\", tidy parallelism and constant hedging all read clanker."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "Is this an AI writing detector?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Sort of — flipped, and for fun. Conventional AI detectors give a binary AI-or-not verdict. The clanker test measures a spectrum of how AI-like writing reads, using the models' own next-token probabilities. It's a toy, not a judgment."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "How is the clanker score calculated?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Every word is scored by its surprisal — negative log probability — under each model given the text so far, across Llama, DeepSeek and Qwen. Lower surprise means more predictable means more clanker. Your overall score is your nearest, least-surprised model."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "What is a cogsucker?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Cogsucker is related anti-AI slang for a human who is a little too fond of the machines. If a clanker is the robot, a cogsucker is its human apologist."
+        }
+      }
+    ]
   }
   </script>
 
@@ -132,6 +184,52 @@
       <span id="method-demo" hidden>(demo mode: logprobs are currently simulated.)</span></p>
     </section>
   </main>
+
+  <!-- Always-visible content for readers and crawlers (the app above is
+       JS-rendered; this stays in the DOM regardless). -->
+  <section class="about" aria-labelledby="about-h">
+    <h2 id="about-h">What is a clanker?</h2>
+    <p><strong>Clanker</strong> is internet slang — borrowed from <em>Star Wars</em> —
+    for a robot or an AI. In 2025 it went mainstream as a jab at anything that sounds
+    machine-made, including AI-generated writing. To be <span class="accent">clanker</span>
+    is to be predictable: to write the words a language model would have picked anyway.</p>
+
+    <h2>The clanker test</h2>
+    <p>This is a <strong>reverse Turing test</strong>. Instead of asking whether a machine
+    can pass for human, it asks how human <em>you</em> sound to the machines. Drop an
+    <span class="accent">@handle</span> to grade someone's recent posts, or finish five
+    sentences to diagnose your own writing. We score each word by its <em>surprisal</em>
+    under Llama, DeepSeek and Qwen — how much the model expected it. Low surprise means
+    low information means clanker.</p>
+
+    <h2>Clanker test — FAQ</h2>
+    <dl class="faq">
+      <dt>What does “clanker” mean?</dt>
+      <dd>Slang for a robot or AI, borrowed from <em>Star Wars</em>. Online in 2025 it became
+      shorthand for anything that sounds machine-made — including AI-generated text. To call
+      writing clanker is to say it reads like a language model wrote it.</dd>
+
+      <dt>Am I a clanker?</dt>
+      <dd>Take the test to find out. If your writing is highly predictable to language models —
+      low surprisal — you score high. Em-dashes, the word “delve”, tidy parallelism and constant
+      hedging all read clanker.</dd>
+
+      <dt>Is this an AI writing detector?</dt>
+      <dd>Sort of — flipped, and for fun. Conventional AI detectors give a binary AI-or-not
+      verdict; the clanker test measures a <em>spectrum</em> of how AI-like writing reads, using
+      the models' own next-token probabilities. It's a toy, not a judgment.</dd>
+
+      <dt>How is the clanker score calculated?</dt>
+      <dd>Every word is scored by its surprisal — negative log probability — under each model
+      given your text so far, across Llama, DeepSeek and Qwen. Lower surprise means more
+      predictable means more clanker; your overall is your nearest, least-surprised model.</dd>
+
+      <dt>What is a cogsucker?</dt>
+      <dd>Related anti-AI slang for a human who's a little too fond of the machines. If a clanker
+      is the robot, a cogsucker is its human apologist.</dd>
+    </dl>
+  </section>
+
   <footer>built by <a href="https://nikliolios.com" target="_blank" rel="noopener">nik liolios</a></footer>
   <script src="/app.js"></script>
 </body>
