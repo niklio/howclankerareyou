@@ -67,6 +67,18 @@ function fail(code, message) {
   return e;
 }
 
+// One-page probe WITHOUT the language filter: does this account have any
+// original posts at all? Used only on the thin path to tell "no readable
+// posts" (handle-miss / dormant / squatter) from "posts exist but none in
+// English" — the two need different analytics (and eventually messaging).
+export async function probeOriginals(env, handle) {
+  const data = await api(env, '/twitter/tweet/advanced_search', {
+    queryType: 'Latest',
+    query: `from:${handle} -filter:retweets -filter:replies`,
+  });
+  return (data.tweets || data.data?.tweets || []).length;
+}
+
 // Resolve a handle to a normalized user object. Throws { code:'notfound' } if
 // the account doesn't exist, { code:'upstream' } if twitterapi.io is flaking —
 // the two must not be conflated (a throttled scraper isn't a missing account).

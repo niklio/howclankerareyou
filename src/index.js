@@ -10,7 +10,7 @@ import {
   heatLevel,
   heatLevelText,
 } from './scoring.js';
-import { parseHandle, getUser, searchSamples } from './twitter.js';
+import { parseHandle, getUser, searchSamples, probeOriginals } from './twitter.js';
 import { ogImage } from './og.js';
 import * as auth from './auth.js';
 import { gatherAnalytics } from './analytics.js';
@@ -456,6 +456,7 @@ async function api(request, env, url, ctx) {
         meta: JSON.stringify({
           handle: extra.handle ? String(extra.handle).toLowerCase() : null,
           outcome,
+          cause: extra.cause ?? null, // thin sub-cause (see thinCause)
           cached: !!extra.cached,
           msTotal: Date.now() - tStart,
           msFetch: extra.msFetch ?? null,
@@ -540,10 +541,11 @@ async function api(request, env, url, ctx) {
         const u = await getUser(env, handle);
         if (u.protected)
           return diag(json({ error: `@${u.handle}'s posts are protected`, code: 'protected', handle: u.handle }, 422), 'protected', { handle: u.handle });
+        const cause = await thinCause(env, u.handle, counts);
         return diag(
           json({ error: `not enough public posts to grade @${u.handle} fairly`, code: 'thin', handle: u.handle, kept: 0 }, 422),
           'thin',
-          { handle: u.handle, pages: counts.pages }
+          { handle: u.handle, pages: counts.pages, cause }
         );
       } catch (err) {
         if (err.code === 'notfound')
@@ -552,10 +554,11 @@ async function api(request, env, url, ctx) {
       }
     }
     if (samples.length < MIN_SAMPLE_TWEETS) {
+      const cause = await thinCause(env, user.handle, counts);
       return diag(
         json({ error: `not enough public posts to grade @${user.handle} fairly`, code: 'thin', handle: user.handle, kept: samples.length }, 422),
         'thin',
-        { handle: user.handle, pages: counts.pages }
+        { handle: user.handle, pages: counts.pages, cause }
       );
     }
 
@@ -795,6 +798,23 @@ async function addUsage(env, n) {
     return row?.calls ?? null;
   } catch {
     return null;
+  }
+}
+
+// Sub-classify a thin outcome so analytics can separate handle misses from
+// honest low-content accounts:
+//   placeholder — someone typed the literal input placeholder
+//   too-short   — English originals exist, but <5 have enough words
+//   not-english — originals exist, none pass the lang:en filter
+//   no-posts    — nothing readable at all (dormant/wiped/squatted handle)
+// The no-lang probe costs one extra scraper call, on the (rare) thin path only.
+async function thinCause(env, handle, counts) {
+  if (String(handle).toLowerCase() === 'handle') return 'placeholder';
+  if ((counts?.fetched || 0) > 0) return 'too-short';
+  try {
+    return (await probeOriginals(env, handle)) > 0 ? 'not-english' : 'no-posts';
+  } catch {
+    return 'unknown';
   }
 }
 
