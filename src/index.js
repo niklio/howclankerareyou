@@ -131,7 +131,7 @@ async function authRoutes(request, env, url, host) {
   }
 
   if (url.pathname === '/auth/logout') {
-    await auth.destroySession(env, auth.getCookie(request, SESSION_COOKIE));
+    await auth.destroySessionsFrom(env, request, SESSION_COOKIE);
     const headers = new Headers({ location: safeNext(next) ? next : CANONICAL });
     // Clear both the domain-scoped and any host-only cookie.
     headers.append('set-cookie', auth.cookieHeader(SESSION_COOKIE, '', { maxAge: 0, domain: COOKIE_DOMAIN }));
@@ -143,7 +143,7 @@ async function authRoutes(request, env, url, host) {
 
 async function analyticsHost(request, env, url) {
   if (url.pathname.startsWith('/api/')) {
-    const email = await auth.sessionEmail(env, auth.getCookie(request, SESSION_COOKIE));
+    const email = await auth.sessionEmailFrom(env, request, SESSION_COOKIE);
     const admin = auth.isAdmin(env, email);
     if (url.pathname === '/api/me') return json({ email: email || null, admin });
     if (!admin) return json({ error: 'forbidden' }, 403);

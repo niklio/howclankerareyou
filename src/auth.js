@@ -63,6 +63,22 @@ export async function sessionEmail(env, sid) {
   return row.email;
 }
 
+// Resolve a session from ALL cookies with this name, not just the first.
+// Browsers can hold duplicate same-name cookies (host-only vs domain-scoped,
+// or a stale one that outlived a DB migration) and send the stale one first —
+// which shadowed fresh logins with a permanent 403 until it expired.
+export async function sessionEmailFrom(env, request, name) {
+  for (const sid of getCookies(request, name)) {
+    const email = await sessionEmail(env, sid);
+    if (email) return email;
+  }
+  return null;
+}
+
+export async function destroySessionsFrom(env, request, name) {
+  for (const sid of getCookies(request, name)) await destroySession(env, sid);
+}
+
 export async function destroySession(env, sid) {
   if (sid) await env.DB.prepare('DELETE FROM web_sessions WHERE id = ?').bind(sid).run();
 }
@@ -79,12 +95,17 @@ export function isAdmin(env, email) {
 // --- cookie helpers ---
 
 export function getCookie(request, name) {
+  return getCookies(request, name)[0] ?? null;
+}
+
+export function getCookies(request, name) {
   const raw = request.headers.get('cookie') || '';
+  const values = [];
   for (const part of raw.split(/;\s*/)) {
     const eq = part.indexOf('=');
-    if (eq > 0 && part.slice(0, eq) === name) return decodeURIComponent(part.slice(eq + 1));
+    if (eq > 0 && part.slice(0, eq) === name) values.push(decodeURIComponent(part.slice(eq + 1)));
   }
-  return null;
+  return values;
 }
 
 export function cookieHeader(name, value, { maxAge, domain } = {}) {
