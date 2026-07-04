@@ -151,7 +151,7 @@ function render(d){
       '<div class="card"><h3>Most-diagnosed accounts</h3>'+((d.topHandles||[]).length?bars(d.topHandles.map(t=>({l:(t.handle.indexOf('u/')===0?'':'@')+t.handle+(t.score!=null?' · '+t.score+'%':''),v:t.lookups})),'l','v'):'<p class="muted">no diagnoses yet</p>')+'</div>'+
       '<div class="card"><h3>Diagnose outcomes</h3>'+((d.outcomes||[]).length?bars(d.outcomes,'outcome','count'):'<p class="muted">no diagnoses yet</p>')+'</div>'+
       '<div class="card"><h3>Traffic sources</h3>'+(d.referrers.length?bars(d.referrers,'ref','count'):'<p class="muted">no referrer data yet</p>')+'</div>'+
-      '<div class="card"><h3>Self-test question funnel</h3>'+bars(d.funnel.map(f=>({l:'Q'+f.step+' '+f.prompt.slice(0,22)+'…',v:f.sessions})),'l','v')+'</div>'+
+      '<div class="card"><h3>Self-test answers per question (bank of 20)</h3>'+bars(d.funnel.map(f=>({l:f.prompt.slice(0,28)+'…',v:f.sessions})),'l','v')+'</div>'+
       '<div class="card"><h3>Inner-clanker model (self-test)</h3>'+bars(d.modelShare,'label','count')+'</div>'+
       '<div class="card"><h3>Most→least clanker question (avg surprisal, nats)</h3>'+bars(d.questionClanker.map(q=>({l:q.prompt.slice(0,30),v:q.avgKl})),'l','v',v=>v.toFixed(1))+'</div>'+
     '</div>'+

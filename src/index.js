@@ -1,4 +1,4 @@
-import { QUESTIONS } from './questions.js';
+import { QUESTIONS, pickQuestions } from './questions.js';
 import {
   MODELS,
   TEXT_MODELS,
@@ -369,7 +369,7 @@ async function api(request, env, url, ctx) {
       .run();
     return json({
       session: id,
-      questions: QUESTIONS,
+      questions: pickQuestions(), // fresh random draw from the bank per session
       models: MODELS.map(({ id, label, maker }) => ({ id, label, maker })),
       mock: isMock(env),
     });
