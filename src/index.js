@@ -513,12 +513,18 @@ async function api(request, env, url, ctx) {
 
     const tFetch = Date.now() - t0;
 
-    // Score every (post × model) pair: one echo call each, all in parallel —
+    // Score every (post × model) pair: one echo call each, near-parallel —
     // 15 calls total, no chains, well inside the Worker's connection budget.
+    // Starts are staggered ~200ms per post-wave so a loaded provider sees a
+    // ramp, not a 15-call wall (deepinfra 429s in waves under burst load).
     const jobs = [];
     for (const t of samples) for (const m of TEXT_MODELS) jobs.push({ t, m });
     const scored = await Promise.all(
-      jobs.map(async ({ t, m }) => ({ t, m, r: await scorePostEcho(env, m, t.text, GRID_COLS) }))
+      jobs.map(async ({ t, m }, i) => {
+        const wave = Math.floor(i / TEXT_MODELS.length);
+        if (wave) await new Promise((r) => setTimeout(r, wave * 200));
+        return { t, m, r: await scorePostEcho(env, m, t.text, GRID_COLS) };
+      })
     );
     const tScore = Date.now() - t0 - tFetch;
 
