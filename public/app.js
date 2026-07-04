@@ -54,17 +54,28 @@ async function runDiagnose() {
   const btn = $('btn-diagnose');
   btn.disabled = true;
   showGather(guessHandle(input));
-  try {
-    const d = await api('/api/diagnose', { input });
-    stopGather();
-    renderResults(d, true);
-  } catch (err) {
-    stopGather();
-    btn.disabled = false;
-    show('landing');
-    errEl.textContent = diagnoseErrorText(err);
-    errEl.hidden = false;
-    $('diag-input').focus();
+  // One silent retry on upstream flake (the scoring provider 429s in waves;
+  // a couple of seconds later usually succeeds) — the gather screen just
+  // keeps running through it.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const d = await api('/api/diagnose', { input });
+      stopGather();
+      renderResults(d, true);
+      return;
+    } catch (err) {
+      if (err.code === 'upstream' && attempt === 0) {
+        await new Promise((r) => setTimeout(r, 2000));
+        continue;
+      }
+      stopGather();
+      btn.disabled = false;
+      show('landing');
+      errEl.textContent = diagnoseErrorText(err);
+      errEl.hidden = false;
+      $('diag-input').focus();
+      return;
+    }
   }
 }
 

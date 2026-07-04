@@ -108,7 +108,7 @@ export async function scoreModel(env, model, promptText, completion) {
 // token logprob, so downstream -logprob math is unchanged). deepinfra
 // occasionally answers 429 "engine_overloaded"; retries back off and the
 // caller treats null as a missing panel member.
-export async function scorePostEcho(env, model, text, window = 8, retries = 3) {
+export async function scorePostEcho(env, model, text, window = 8, retries = 4) {
   if (isMock(env)) return mockEcho(model.id, text, window);
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -162,7 +162,12 @@ export async function scorePostEcho(env, model, text, window = 8, retries = 3) {
       return { avgKL, steps: kept.length, perStep };
     } catch (err) {
       console.log(`scorePostEcho ${model.id} attempt ${attempt}: ${err}`);
-      if (attempt < retries) await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
+      // deepinfra throws 429 "Model busy" in waves under load. Back off
+      // exponentially WITH jitter — 15 sibling calls retrying in lockstep
+      // would just re-form the wall that got them throttled.
+      if (attempt < retries) {
+        await new Promise((r) => setTimeout(r, 500 * 2 ** attempt + Math.random() * 400));
+      }
     }
   }
   return null;
