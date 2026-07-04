@@ -30,10 +30,16 @@ const verdictFor = (list, overall) => list.find(([min]) => overall >= min)[1];
 // magenta score) — more portable than text-shadow across satori versions.
 function cardHtml(row) {
   const acct = row.subject_type === 'account';
-  const who = acct ? `@${row.subject_handle} is` : 'certified';
-  const tail = acct ? 'clanker' : 'clanker';
-  const quip = verdictFor(acct ? ACCOUNT_VERDICTS : SELF_VERDICTS, row.overall);
-  const context = acct ? 'graded from public posts on X' : 'a surprisal Turing test, reversed';
+  const reddit = row.subject_platform === 'reddit';
+  const who = acct ? `${reddit ? 'u/' : '@'}${row.subject_handle} is` : 'certified';
+  const tail = 'clanker';
+  const quip = verdictFor(acct ? ACCOUNT_VERDICTS : SELF_VERDICTS, row.overall).replace(
+    'tweets',
+    reddit ? 'comments' : 'tweets'
+  );
+  const context = acct
+    ? `graded from public ${reddit ? 'comments on reddit' : 'posts on X'}`
+    : 'a surprisal Turing test, reversed';
   const score = `${row.overall}%`;
   return `
   <div style="display:flex;flex-direction:column;justify-content:space-between;width:1200px;height:630px;

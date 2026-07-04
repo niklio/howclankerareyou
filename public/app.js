@@ -41,9 +41,11 @@ let navGen = 0;
 // Account results get the short, stable share path (/r/handle → that
 // account's latest grade); self-tests keep their UUID path.
 function resultPath(fin) {
-  return fin.subject && fin.subject.type === 'account' && fin.subject.handle
-    ? `/r/${fin.subject.handle}`
-    : `/r/${fin.id}`;
+  if (fin.subject && fin.subject.type === 'account' && fin.subject.handle) {
+    const prefix = fin.subject.platform === 'reddit' ? 'u/' : '';
+    return `/r/${prefix}${fin.subject.handle}`;
+  }
+  return `/r/${fin.id}`;
 }
 
 function pushResult(fin, live) {
@@ -61,7 +63,7 @@ window.addEventListener('popstate', (e) => {
     renderResults(st.fin, !!st.live);
     return;
   }
-  const m = location.pathname.match(/^\/r\/([A-Za-z0-9_-]{1,64})$/);
+  const m = location.pathname.match(/^\/r\/((?:u\/)?[A-Za-z0-9_-]{1,64})$/);
   if (m) {
     api(`/api/result/${m[1]}`)
       .then((d) => renderResults(d, false))
@@ -91,14 +93,14 @@ async function runDiagnose() {
   const errEl = $('diag-err');
   errEl.hidden = true;
   if (!input) {
-    errEl.textContent = 'enter an @handle.';
+    errEl.textContent = 'enter an @handle or u/name.';
     errEl.hidden = false;
     return;
   }
   const btn = $('btn-diagnose');
   btn.disabled = true;
   const gen = navGen;
-  showGather(guessHandle(input));
+  showGather(guessLabel(input));
   // One silent retry on upstream flake (the scoring provider 429s in waves;
   // a couple of seconds later usually succeeds) — the gather screen just
   // keeps running through it.
@@ -127,21 +129,24 @@ async function runDiagnose() {
   }
 }
 
-// Best-effort handle for the gathering screen before the server confirms it.
-function guessHandle(input) {
-  return input.replace(/^@/, '').replace(/[^A-Za-z0-9_].*$/, '').slice(0, 15) || 'them';
+// Best-effort display label for the gathering screen before the server
+// confirms it: "@name" for X, "u/name" for reddit.
+function guessLabel(input) {
+  const r = input.match(/^\/?u\/([A-Za-z0-9_-]{1,20})/i);
+  if (r) return 'u/' + r[1];
+  return '@' + (input.replace(/^@/, '').replace(/[^A-Za-z0-9_].*$/, '').slice(0, 15) || 'them');
 }
 
 function diagnoseErrorText(err) {
   switch (err.code) {
     case 'badinput':
-      return "that doesn't look like an X handle — just the @handle, no links.";
+      return "that doesn't look right — an X @handle or a reddit u/name, no links.";
     case 'notfound':
       return err.message + ' — check the spelling.';
     case 'protected':
       return err.message + ' — this account is private, so we can’t read it. try a public one.';
     case 'thin':
-      return err.message + ' — we need 5 recent original posts of ~11+ words. try someone wordier.';
+      return err.message + ' — we need 5 recent ones of ~11+ words. try someone wordier.';
     case 'blocked':
       return 'this account asked to be removed from the tool.';
     case 'ratelimited':
@@ -156,14 +161,19 @@ function diagnoseErrorText(err) {
 // Gathering screen: no per-step server feedback (it's one request), so the
 // scan check-offs and bar are optimistic timers, cleaned up when the call
 // resolves.
-function showGather(handle) {
-  $('gather-tag').textContent = `// diagnosing @${handle}`;
-  $('gather-head').textContent = `pulling @${handle}'s recent posts…`;
+function showGather(label) {
+  const reddit = label.startsWith('u/');
+  const noun = reddit ? 'comments' : 'posts';
+  const platform = reddit ? 'reddit' : 'X';
+  $('gather-tag').textContent = `// diagnosing ${label}`;
+  $('gather-head').textContent = `pulling ${label}'s recent ${noun}…`;
   const scan = $('gather-scan').children;
   scan[0].className = 'wait';
-  scan[0].textContent = '⋯ finding the account on X';
+  scan[0].textContent = `⋯ finding the account on ${platform}`;
   scan[1].className = 'wait';
-  scan[1].textContent = '⋯ pulling their 5 most recent posts (retweets & replies excluded)';
+  scan[1].textContent = reddit
+    ? '⋯ pulling their 5 most recent comments'
+    : '⋯ pulling their 5 most recent posts (retweets & replies excluded)';
   scan[2].className = 'wait';
   scan[2].textContent = '⋯ scoring word-by-word against the model panel';
   const fill = $('gather-fill');
@@ -177,12 +187,14 @@ function showGather(handle) {
   state.gatherTimers.push(
     setTimeout(() => {
       scan[0].className = 'ok';
-      scan[0].textContent = `✓ found @${handle}`;
+      scan[0].textContent = `✓ found ${label}`;
       fill.style.width = `${(pct = 25)}%`;
     }, 700),
     setTimeout(() => {
       scan[1].className = 'ok';
-      scan[1].textContent = '✓ pulled their 5 most recent posts (retweets & replies excluded)';
+      scan[1].textContent = reddit
+        ? '✓ pulled their 5 most recent comments'
+        : '✓ pulled their 5 most recent posts (retweets & replies excluded)';
       fill.style.width = `${(pct = 45)}%`;
     }, 1700),
     setInterval(() => {
@@ -318,15 +330,22 @@ function renderResults(fin, live) {
 
   const url = fin.id ? location.origin + resultPath(fin) : location.origin;
 
-  // Headline.
+  // Headline. A 10-wide grid marks the thin-account fallback (normal account
+  // grids are 8 wide) — detecting by shape means cached and shared results
+  // carry the note for free.
+  const reddit = acct && fin.subject.platform === 'reddit';
+  const whom = reddit ? `u/${handle}` : `@${handle}`;
+  const thinAcct = acct && fin.grid && fin.grid.length > 0 && fin.grid[0].cells.length === 10;
   if (acct) {
     const cachedNote = fin.cached ? ' · graded earlier this week' : '';
+    const profile = reddit ? `https://www.reddit.com/user/${esc(handle)}` : `https://x.com/${esc(handle)}`;
     $('res-context').innerHTML =
-      `graded from public posts on X · <a href="https://x.com/${esc(handle)}" target="_blank" rel="noopener" style="color:var(--accent)">@${esc(handle)}</a>` +
+      `graded from public ${reddit ? 'comments on reddit' : 'posts on X'} · <a href="${profile}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(whom)}</a>` +
       cachedNote;
     $('res-score').textContent = `${fin.overall}%`;
-    $('res-score').previousSibling.textContent = `@${handle} is `;
-    $('res-verdict').textContent = ACCOUNT_VERDICTS.find(([min]) => fin.overall >= min)[1];
+    $('res-score').previousSibling.textContent = `${whom} is `;
+    const quip0 = ACCOUNT_VERDICTS.find(([min]) => fin.overall >= min)[1];
+    $('res-verdict').textContent = reddit ? quip0.replace('tweets', 'comments') : quip0;
     $('res-percentile').textContent =
       fin.percentile == null
         ? 'the first specimen. percentile pending more accounts.'
@@ -361,16 +380,21 @@ function renderResults(fin, live) {
       )
       .join('');
 
+  const thinEl = $('res-thin');
+  thinEl.hidden = !thinAcct;
+  if (thinAcct)
+    thinEl.textContent = 'thin account — graded from everything public we could find, take it with extra salt.';
+
   $('res-details').innerHTML = renderDetails(fin.grid, acct);
 
   // Sampled posts (accounts only).
   if (acct && fin.sources && fin.sources.length) {
     $('res-sources').innerHTML =
-      `<h2 class="section">posts sampled — ${fin.sources.length}</h2>` +
+      `<h2 class="section">${reddit ? 'comments' : 'posts'} sampled — ${fin.sources.length}</h2>` +
       fin.sources
         .map(
           (s) =>
-            `<div class="src"><span class="badge">@${esc(handle)}</span><span>${esc(s.text)}</span></div>`
+            `<div class="src"><span class="badge">${esc(whom)}</span><span>${esc(s.text)}</span></div>`
         )
         .join('');
   } else {
@@ -389,7 +413,9 @@ function renderResults(fin, live) {
       )
       .join('');
     $('grid-legend').innerHTML = acct
-      ? 'one row per post, one square per scored word · <span class="good">green</span> = human · <span class="accent">red</span> = clanker'
+      ? (thinAcct
+          ? 'one square per scored word, everything strung together · <span class="good">green</span> = human · <span class="accent">red</span> = clanker'
+          : 'one row per post, one square per scored word · <span class="good">green</span> = human · <span class="accent">red</span> = clanker')
       : 'one square per word · <span class="good">green</span> = human · <span class="accent">red</span> = clanker';
     $('grid-legend').hidden = false;
   } else {
@@ -480,8 +506,10 @@ const gridToEmoji = (grid) =>
 // quip instead. The link unfurls into the OG card for the visual.
 function shareText(fin, grid, url, acct) {
   if (acct) {
-    const quip = ACCOUNT_VERDICTS.find(([min]) => fin.overall >= min)[1];
-    return `@${fin.subject.handle} is ${fin.overall}% clanker 🤖\n${quip}\n\n${url}`;
+    const isR = fin.subject.platform === 'reddit';
+    const quip = ACCOUNT_VERDICTS.find(([min]) => fin.overall >= min)[1].replace('tweets', isR ? 'comments' : 'tweets');
+    const whom = isR ? `u/${fin.subject.handle}` : `@${fin.subject.handle}`;
+    return `${whom} is ${fin.overall}% clanker 🤖\n${quip}\n\n${url}`;
   }
   return `how clanker are you? — ${fin.overall}% clanker 🤖\n\n${gridToEmoji(grid)}\n\n${url}`;
 }
@@ -576,6 +604,13 @@ function esc(s) {
 
 // --- init ------------------------------------------------------------------
 
+// The full placeholder overflows narrow screens (same breakpoint where the
+// searchbar stacks); swap in the compact form there. The hero copy above the
+// input already spells out both platforms.
+if (window.matchMedia && window.matchMedia('(max-width: 560px)').matches) {
+  $('diag-input').placeholder = '@handle or u/name';
+}
+
 api('/api/status')
   .then((s) => {
     if (s.mock) {
@@ -586,7 +621,7 @@ api('/api/status')
   .catch(() => {});
 
 const restored = history.state;
-const shared = location.pathname.match(/^\/r\/([A-Za-z0-9_-]{1,64})$/);
+const shared = location.pathname.match(/^\/r\/((?:u\/)?[A-Za-z0-9_-]{1,64})$/);
 if (restored && restored.view === 'result' && restored.fin) {
   // Reload of a result we rendered this session: history.state survives
   // refresh, so the taker keeps their live view (share button and all).
@@ -605,7 +640,10 @@ if (restored && restored.view === 'result' && restored.fin) {
       // prefill it — one click re-runs the diagnosis.
       show('landing');
       const errEl = $('diag-err');
-      if (/^[A-Za-z0-9_]{1,15}$/.test(shared[1])) {
+      if (/^u\/[A-Za-z0-9_-]{3,20}$/i.test(shared[1])) {
+        $('diag-input').value = shared[1];
+        errEl.textContent = 'no grade on file for ' + shared[1] + ' — hit diagnose to make one.';
+      } else if (/^[A-Za-z0-9_]{1,15}$/.test(shared[1])) {
         $('diag-input').value = '@' + shared[1];
         errEl.textContent = 'no grade on file for @' + shared[1] + ' — hit diagnose to make one.';
       } else {

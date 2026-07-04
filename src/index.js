@@ -11,6 +11,7 @@ import {
   heatLevelText,
 } from './scoring.js';
 import { parseHandle, getUser, searchSamples, probeOriginals } from './twitter.js';
+import { parseRedditor, redditSamples } from './reddit.js';
 import { ogImage } from './og.js';
 import * as auth from './auth.js';
 import { gatherAnalytics } from './analytics.js';
@@ -35,6 +36,13 @@ const SAMPLE_TWEETS = 5;
 const GRID_COLS = 8;
 const MIN_POST_WORDS = GRID_COLS + 3; // full window + ≥3 words of warmup
 const MIN_SAMPLE_TWEETS = 5;
+// Thin-account fallback: when fewer than MIN_SAMPLE_TWEETS items qualify,
+// concatenate EVERYTHING pulled (newest first), warm up on the first
+// F_WARMUP words, score up to the next F_ROWS × F_COLS, and reshape the grid
+// into 10-wide rows. Reject only when nothing exists past the warmup.
+const F_WARMUP = 10;
+const F_COLS = 10;
+const F_ROWS = 5;
 // Repeat lookups of the same handle reuse the stored result for a week —
 // popular accounts would otherwise re-burn scraper credits + inference on
 // every curious visitor. A week is fine: 5 recent posts don't move fast.
@@ -71,7 +79,7 @@ export default {
     // Dynamic OG card for a result: /og/<key>.png. Edge-cached per URL (the
     // rewriter appends ?v=<score>, so a re-diagnosis mints a fresh URL).
     // Unknown keys fall back to the static og.png.
-    const og = request.method === 'GET' && url.pathname.match(/^\/og\/([A-Za-z0-9_-]{1,64})\.png$/);
+    const og = request.method === 'GET' && url.pathname.match(/^\/og\/((?:u\/)?[A-Za-z0-9_-]{1,64})\.png$/);
     if (og) {
       const cached = await caches.default.match(request);
       if (cached) return cached;
@@ -87,7 +95,7 @@ export default {
 
     // Fire-and-forget traffic instrumentation.
     if (request.method === 'GET' && url.pathname === '/') logEvent(env, ctx, request, 'pageview');
-    else if (['GET', 'HEAD'].includes(request.method) && /^\/r\/[A-Za-z0-9_-]{1,64}$/.test(url.pathname)) {
+    else if (['GET', 'HEAD'].includes(request.method) && /^\/r\/(?:u\/)?[A-Za-z0-9_-]{1,64}$/.test(url.pathname)) {
       // /r/<uuid> (self-tests, legacy links) or /r/<handle> (account share
       // links). meta = the key, so analytics can join views to results.
       const key = url.pathname.slice(3);
@@ -117,11 +125,13 @@ export default {
           const row = await resultByKey(env, key);
           if (row) {
             const acct = row.subject_type === 'account';
+            const reddit = row.subject_platform === 'reddit';
+            const whom = reddit ? `u/${row.subject_handle}` : `@${row.subject_handle}`;
             const title = acct
-              ? `@${row.subject_handle} is ${row.overall}% clanker`
+              ? `${whom} is ${row.overall}% clanker`
               : `certified ${row.overall}% clanker`;
             const desc = acct
-              ? `graded from @${row.subject_handle}'s public posts on X — word by word, by the models. how clanker are you?`
+              ? `graded from ${whom}'s public ${reddit ? 'comments on reddit' : 'posts on X'} — word by word, by the models. how clanker are you?`
               : `a surprisal Turing test, taken by a human (allegedly). how clanker are you?`;
             const set = (attr) => ({ element: (e) => e.setAttribute('content', attr) });
             out = new HTMLRewriter()
@@ -290,6 +300,23 @@ async function api(request, env, url, ctx) {
     return json(await gatherAnalytics(env, url.searchParams.get('range') || 'week'));
   }
 
+  // TEMPORARY (staging only): does Reddit serve RSS to Workers egress IPs?
+  if (env.BENCH === '1' && request.method === 'GET' && pathname === '/api/_rss') {
+    const name = url.searchParams.get('u') || 'spez';
+    if (!/^[A-Za-z0-9_-]{3,20}$/.test(name)) return json({ error: 'bad' }, 400);
+    const t0 = Date.now();
+    const res = await fetch(`https://www.reddit.com/user/${name}/comments.rss`, {
+      headers: { 'user-agent': 'howclankerareyou/1.0 rss reader (https://howclankerareyou.com)' },
+    });
+    const bodyText = await res.text();
+    return json({
+      status: res.status,
+      ms: Date.now() - t0,
+      bytes: bodyText.length,
+      entries: (bodyText.match(/<entry>/g) || []).length,
+    });
+  }
+
 
   // TEMPORARY latency bench (staging only: BENCH var unset in prod → 404).
   // Fires n parallel single-token logprob calls at the HF router to measure
@@ -453,21 +480,30 @@ async function api(request, env, url, ctx) {
     });
   }
 
-  // Diagnose an X account: resolve → pull recent posts → score each post
-  // against every model → aggregate into the same result shape the share page
-  // already renders. Costs many upstream calls, so it's rate-limited and
-  // counts toward the daily cap.
+  // Diagnose an account (X handle or reddit u/name): resolve → pull recent
+  // posts/comments → score each against every model → aggregate into the same
+  // result shape the share page already renders. Costs many upstream calls,
+  // so it's rate-limited and counts toward the daily cap.
   if (request.method === 'POST' && pathname === '/api/diagnose') {
     const tStart = Date.now();
+    const body = await request.json().catch(() => ({}));
+    // "u/name" → reddit; "@handle" / bare → X. displayKey is what analytics
+    // and the blocklist see (u/ prefix keeps the namespaces apart).
+    const redditor = parseRedditor(body.input);
+    const platform = redditor ? 'reddit' : 'x';
+    const handle = redditor || parseHandle(body.input);
+    const displayKey = (h) => (platform === 'reddit' ? `u/${h}` : h);
+
     // Every exit logs exactly one `diagnose` event: outcome + timings (+ cache
-    // flag and search-page count for cost tracking). The analytics dashboard
+    // flag and upstream-call count for cost tracking). The analytics dashboard
     // is built on these.
     const diag = (res, outcome, extra = {}) => {
       logEvent(env, ctx, request, 'diagnose', {
         meta: JSON.stringify({
-          handle: extra.handle ? String(extra.handle).toLowerCase() : null,
+          handle: extra.handle ? displayKey(String(extra.handle).toLowerCase()) : null,
           outcome,
           cause: extra.cause ?? null, // thin sub-cause (see thinCause)
+          platform,
           cached: !!extra.cached,
           msTotal: Date.now() - tStart,
           msFetch: extra.msFetch ?? null,
@@ -486,13 +522,11 @@ async function api(request, env, url, ctx) {
       }
     }
 
-    const body = await request.json().catch(() => ({}));
-    const handle = parseHandle(body.input);
     if (!handle) {
-      return diag(json({ error: "that doesn't look like an X handle", code: 'badinput' }, 400), 'badinput');
+      return diag(json({ error: "that doesn't look like an X @handle or a reddit u/name", code: 'badinput' }, 400), 'badinput');
     }
 
-    if (await isBlocked(env, handle)) {
+    if (await isBlocked(env, displayKey(handle))) {
       return diag(json({ error: 'this account asked to be removed from the tool', code: 'blocked' }, 403), 'blocked', { handle });
     }
 
@@ -502,9 +536,10 @@ async function api(request, env, url, ctx) {
     // accounts get graded).
     const cached = await env.DB.prepare(
       `SELECT * FROM results WHERE subject_type = 'account' AND lower(subject_handle) = ?
+       AND COALESCE(subject_platform, 'x') = ?
        AND created_at > ? ORDER BY created_at DESC LIMIT 1`
     )
-      .bind(handle.toLowerCase(), Date.now() - DIAGNOSE_CACHE_MS)
+      .bind(handle.toLowerCase(), platform, Date.now() - DIAGNOSE_CACHE_MS)
       .first();
     if (cached) {
       const grid = cached.grid ? JSON.parse(cached.grid) : null;
@@ -519,6 +554,7 @@ async function api(request, env, url, ctx) {
           cached: true,
           subject: {
             type: 'account',
+            platform: cached.subject_platform || 'x',
             handle: cached.subject_handle,
             name: cached.subject_name,
             kept: grid ? grid.length : null,
@@ -534,25 +570,30 @@ async function api(request, env, url, ctx) {
     }
 
     const t0 = Date.now();
-    // One advanced-search call returns the account's original posts + author
-    // metadata together (no user/info round-trip, no timeline pagination in
-    // the common case). getUser runs only on the empty-result sad path to
-    // distinguish protected / nonexistent / just-quiet accounts.
-    let user, samples, counts;
+    // One source call returns the account's recent material + author identity
+    // together (X: advanced search over original posts; reddit: newest
+    // comments). getUser runs only on X's empty-result sad path to distinguish
+    // protected / nonexistent / just-quiet accounts.
+    const who = (h) => (platform === 'reddit' ? `u/${h}` : `@${h}`);
+    let user, samples, counts, raw;
     try {
-      ({ user, samples, counts } = await searchSamples(env, handle, {
-        maxTweets: SAMPLE_TWEETS,
-        minWords: MIN_POST_WORDS,
-      }));
+      ({ user, samples, counts, raw } =
+        platform === 'reddit'
+          ? await redditSamples(env, handle, { maxItems: SAMPLE_TWEETS, minWords: MIN_POST_WORDS })
+          : await searchSamples(env, handle, { maxTweets: SAMPLE_TWEETS, minWords: MIN_POST_WORDS }));
     } catch (err) {
       return diag(json({ error: 'the post source is having a moment — try again in a sec', code: 'upstream' }, 502), 'upstream', { handle });
     }
     if (!user) {
+      if (platform === 'reddit') {
+        // KeyAPI answers a definitive null for unknown redditors.
+        return diag(json({ error: `can't find u/${handle} on reddit`, code: 'notfound' }, 404), 'notfound', { handle });
+      }
       try {
         const u = await getUser(env, handle);
         if (u.protected)
           return diag(json({ error: `@${u.handle}'s posts are protected`, code: 'protected', handle: u.handle }, 422), 'protected', { handle: u.handle });
-        const cause = await thinCause(env, u.handle, counts);
+        const cause = await thinCause(env, u.handle, counts, platform);
         return diag(
           json({ error: `not enough public posts to grade @${u.handle} fairly`, code: 'thin', handle: u.handle, kept: 0 }, 422),
           'thin',
@@ -565,12 +606,103 @@ async function api(request, env, url, ctx) {
       }
     }
     if (samples.length < MIN_SAMPLE_TWEETS) {
-      const cause = await thinCause(env, user.handle, counts);
-      return diag(
-        json({ error: `not enough public posts to grade @${user.handle} fairly`, code: 'thin', handle: user.handle, kept: samples.length }, 422),
-        'thin',
-        { handle: user.handle, pages: counts.pages, cause }
+      // Not enough full items for the 5×8 grid — fall back to grading the
+      // concatenation of everything pulled. Only accounts with nothing past
+      // the warmup get rejected.
+      const allWords = (raw || []).join(' ').split(/\s+/).filter(Boolean);
+      if (allWords.length <= F_WARMUP + 1) {
+        const cause = await thinCause(env, user.handle, counts, platform);
+        return diag(
+          json({ error: `not enough public ${platform === 'reddit' ? 'comments' : 'posts'} to grade ${who(user.handle)} fairly`, code: 'thin', handle: user.handle, kept: samples.length }, 422),
+          'thin',
+          { handle: user.handle, pages: counts.pages, cause }
+        );
+      }
+      const windowN = Math.min(F_ROWS * F_COLS, allWords.length - F_WARMUP);
+      const text = allWords.slice(0, F_WARMUP + windowN).join(' ');
+      const tFetchF = Date.now() - t0;
+      const scoredF = await Promise.all(
+        TEXT_MODELS.map(async (m, i) => {
+          if (i) await new Promise((r) => setTimeout(r, i * 150));
+          return { m, r: await scorePostEcho(env, m, text, windowN) };
+        })
       );
+      const tScoreF = Date.now() - t0 - tFetchF;
+      ctx?.waitUntil?.(addUsage(env, TEXT_MODELS.length - 1));
+
+      const okF = scoredF.filter((x) => x.r);
+      if (!okF.length) {
+        return diag(json({ error: 'scoring failed — try again in a sec', code: 'upstream' }, 502), 'upstream', {
+          handle: user.handle, msFetch: tFetchF, msScore: tScoreF, pages: counts.pages,
+        });
+      }
+      const perModel = okF.map(({ m, r }) => ({
+        model: m.id,
+        label: m.label,
+        maker: m.maker,
+        avgKL: Math.round(r.avgKL * 1000) / 1000,
+        score: clankerScoreText(r.avgKL, m.d0text),
+        posts: raw.length,
+      }));
+      const overall = Math.max(...perModel.map((m) => m.score));
+
+      // Grid: 10-wide rows over the scored words, per-cell mean across models
+      // (all models scored the same window of the same text → word-aligned).
+      const steps = okF.map((x) => x.r.perStep);
+      const scoredWords = allWords.slice(F_WARMUP, F_WARMUP + windowN);
+      const grid = [];
+      for (let start = 0; start < windowN; start += F_COLS) {
+        const cells = [];
+        const rowVals = [];
+        for (let j = 0; j < F_COLS; j++) {
+          const pos = start + j;
+          if (pos >= windowN) { cells.push(null); continue; }
+          const vals = steps.map((ps) => ps[pos]).filter(Boolean).map((s) => -s.logprob);
+          if (vals.length) rowVals.push(...vals);
+          cells.push(vals.length ? heatLevelText(vals.reduce((a, b) => a + b, 0) / vals.length) : null);
+        }
+        grid.push({
+          prompt: who(user.handle),
+          answer: scoredWords.slice(start, Math.min(start + F_COLS, windowN)).join(' '),
+          cells,
+          kl: rowVals.length ? Math.round((rowVals.reduce((a, b) => a + b, 0) / rowVals.length) * 100) / 100 : null,
+        });
+      }
+      const sources = raw.slice(0, 10).map((t, i) => ({ id: `f${i}`, text: t }));
+
+      const id = crypto.randomUUID();
+      ctx?.waitUntil?.(
+        env.DB.prepare(
+          `INSERT INTO results (id, created_at, overall, per_model, grid, subject_type, subject_handle, subject_name, sources, subject_platform)
+           VALUES (?, ?, ?, ?, ?, 'account', ?, ?, ?, ?)`
+        )
+          .bind(id, Date.now(), overall, JSON.stringify(perModel), JSON.stringify(grid), user.handle, user.name || who(user.handle), JSON.stringify(sources), platform)
+          .run()
+      );
+
+      const out = {
+        id,
+        overall,
+        perModel,
+        grid,
+        sources,
+        percentile: await percentile(env, overall, 'account'),
+        subject: {
+          type: 'account',
+          platform,
+          handle: user.handle,
+          name: user.name,
+          thin: true,
+          fetched: counts.fetched,
+          kept: raw.length,
+          words: allWords.length,
+        },
+      };
+      if (env.BENCH === '1') out.debug = { tFetch: tFetchF, tScore: tScoreF, tTotal: Date.now() - t0 };
+      // outcome success; cause marks the fallback so analytics can count it.
+      return diag(json(out), 'success', {
+        handle: user.handle, cause: 'fallback', msFetch: tFetchF, msScore: tScoreF, pages: counts.pages,
+      });
     }
 
     const tFetch = Date.now() - t0;
@@ -633,7 +765,7 @@ async function api(request, env, url, ctx) {
 
     // Nearest (least-surprised) model sets the number, same as the self-test.
     const overall = Math.max(...perModel.map((m) => m.score));
-    const grid = buildDiagnoseGrid(samples, byId, user.handle);
+    const grid = buildDiagnoseGrid(samples, byId, who(user.handle));
     const sources = samples.map((t) => ({ id: t.id, text: t.text }));
 
     // Persist off the critical path — the row lands in ~50ms, long before a
@@ -641,8 +773,8 @@ async function api(request, env, url, ctx) {
     const id = crypto.randomUUID();
     ctx?.waitUntil?.(
       env.DB.prepare(
-        `INSERT INTO results (id, created_at, overall, per_model, grid, subject_type, subject_handle, subject_name, sources)
-         VALUES (?, ?, ?, ?, ?, 'account', ?, ?, ?)`
+        `INSERT INTO results (id, created_at, overall, per_model, grid, subject_type, subject_handle, subject_name, sources, subject_platform)
+         VALUES (?, ?, ?, ?, ?, 'account', ?, ?, ?, ?)`
       )
         .bind(
           id,
@@ -652,7 +784,8 @@ async function api(request, env, url, ctx) {
           JSON.stringify(grid),
           user.handle,
           user.name,
-          JSON.stringify(sources)
+          JSON.stringify(sources),
+          platform
         )
         .run()
     );
@@ -666,6 +799,7 @@ async function api(request, env, url, ctx) {
       percentile: await percentile(env, overall, 'account'),
       subject: {
         type: 'account',
+        platform,
         handle: user.handle,
         name: user.name,
         followers: user.followers,
@@ -688,22 +822,26 @@ async function api(request, env, url, ctx) {
   // subject themselves can trigger it from a result page.
   if (request.method === 'POST' && pathname === '/api/remove') {
     const body = await request.json().catch(() => ({}));
-    const handle = parseHandle(body.handle);
+    const redditor = parseRedditor(body.handle);
+    const handle = redditor || parseHandle(body.handle);
     if (!handle) return json({ error: 'bad handle', code: 'badinput' }, 400);
+    const platform = redditor ? 'reddit' : 'x';
     const lc = handle.toLowerCase();
+    const blockKey = redditor ? `u/${lc}` : lc; // u/ prefix keeps namespaces apart
     try {
       await env.DB.prepare('INSERT OR IGNORE INTO blocklist (handle, created_at) VALUES (?, ?)')
-        .bind(lc, Date.now())
+        .bind(blockKey, Date.now())
         .run();
       await env.DB.prepare(
-        "DELETE FROM results WHERE subject_type = 'account' AND lower(subject_handle) = ?"
+        `DELETE FROM results WHERE subject_type = 'account' AND lower(subject_handle) = ?
+         AND COALESCE(subject_platform, 'x') = ?`
       )
-        .bind(lc)
+        .bind(lc, platform)
         .run();
     } catch (err) {
       return json({ error: 'could not remove — try again', code: 'upstream' }, 500);
     }
-    logEvent(env, ctx, request, 'optout', { meta: lc });
+    logEvent(env, ctx, request, 'optout', { meta: blockKey });
     return json({ ok: true });
   }
 
@@ -721,6 +859,7 @@ async function api(request, env, url, ctx) {
     if (row.subject_type === 'account') {
       out.subject = {
         type: 'account',
+        platform: row.subject_platform || 'x',
         handle: row.subject_handle,
         name: row.subject_name,
         kept: row.grid ? JSON.parse(row.grid).length : null,
@@ -766,8 +905,9 @@ function buildGrid(rows) {
 // Build the account share grid: one row per sampled post, always GRID_COLS
 // cells wide (5×8 with the current tuning — clean emoji share). Every model
 // scores the same last-GRID_COLS-words window, so cell j is the same word for
-// all models: its heat is the mean word surprisal across models.
-function buildDiagnoseGrid(samples, byId, handle) {
+// all models: its heat is the mean word surprisal across models. `label` is
+// the display identity ("@handle" or "u/name") used as each row's prompt.
+function buildDiagnoseGrid(samples, byId, label) {
   const grid = [];
   for (const t of samples) {
     const perModel = byId[t.id];
@@ -787,7 +927,7 @@ function buildDiagnoseGrid(samples, byId, handle) {
       return -kept.reduce((s, p) => s + p.logprob, 0) / kept.length;
     }).filter((v) => v != null);
     const kl = kls.length ? Math.round((kls.reduce((a, b) => a + b, 0) / kls.length) * 100) / 100 : null;
-    grid.push({ prompt: `@${handle}`, answer: t.text, cells, kl });
+    grid.push({ prompt: label, answer: t.text, cells, kl });
   }
   return grid;
 }
@@ -815,13 +955,15 @@ async function addUsage(env, n) {
 // Sub-classify a thin outcome so analytics can separate handle misses from
 // honest low-content accounts:
 //   placeholder — someone typed the literal input placeholder
-//   too-short   — English originals exist, but <5 have enough words
-//   not-english — originals exist, none pass the lang:en filter
+//   too-short   — material exists, but <5 items have enough words
+//   not-english — X only: originals exist, none pass the lang:en filter
 //   no-posts    — nothing readable at all (dormant/wiped/squatted handle)
-// The no-lang probe costs one extra scraper call, on the (rare) thin path only.
-async function thinCause(env, handle, counts) {
-  if (String(handle).toLowerCase() === 'handle') return 'placeholder';
+// The X no-lang probe costs one extra scraper call, on the (rare) thin path
+// only; reddit needs no probe (comments come back unfiltered).
+async function thinCause(env, handle, counts, platform = 'x') {
+  if (['handle', 'name'].includes(String(handle).toLowerCase())) return 'placeholder';
   if ((counts?.fetched || 0) > 0) return 'too-short';
+  if (platform === 'reddit') return 'no-posts';
   try {
     return (await probeOriginals(env, handle)) > 0 ? 'not-english' : 'no-posts';
   } catch {
@@ -829,23 +971,24 @@ async function thinCause(env, handle, counts) {
   }
 }
 
-// Resolve a result by key: either a result UUID (self-tests, legacy account
-// links) or an X handle (short share links: /r/jack → jack's LATEST
-// diagnosis, case-insensitive). The shapes can't collide: UUIDs are 36 chars
-// with dashes, handles ≤15 chars of [A-Za-z0-9_].
+// Resolve a result by key: a result UUID (self-tests, legacy account links),
+// an X handle (/r/jack), or a redditor (/r/u/jack) — each resolving to that
+// account's LATEST diagnosis, case-insensitive. The shapes can't collide:
+// UUIDs are 36 chars with dashes, X handles ≤15 chars of [A-Za-z0-9_], and
+// the u/ prefix marks reddit.
 async function resultByKey(env, key) {
   if (/^[0-9a-fA-F-]{16,}$/.test(key)) {
     return env.DB.prepare('SELECT * FROM results WHERE id = ?').bind(key).first();
   }
-  if (/^[A-Za-z0-9_]{1,15}$/.test(key)) {
-    return env.DB.prepare(
-      `SELECT * FROM results WHERE subject_type = 'account' AND lower(subject_handle) = ?
-       ORDER BY created_at DESC LIMIT 1`
-    )
-      .bind(key.toLowerCase())
-      .first();
-  }
-  return null;
+  const rm = key.match(/^u\/([A-Za-z0-9_-]{3,20})$/i);
+  const handle = rm ? rm[1] : /^[A-Za-z0-9_]{1,15}$/.test(key) ? key : null;
+  if (!handle) return null;
+  return env.DB.prepare(
+    `SELECT * FROM results WHERE subject_type = 'account' AND lower(subject_handle) = ?
+     AND COALESCE(subject_platform, 'x') = ? ORDER BY created_at DESC LIMIT 1`
+  )
+    .bind(handle.toLowerCase(), rm ? 'reddit' : 'x')
+    .first();
 }
 
 // Whether a handle has opted out. Fail-open (treat errors as not-blocked) so a
