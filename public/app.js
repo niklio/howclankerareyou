@@ -31,6 +31,41 @@ async function api(path, body) {
   return data;
 }
 
+// --- browser history --------------------------------------------------------
+// Results get real URLs (/r/:id, pushed with the full payload in state so
+// back/forward re-render instantly, and the address bar IS the share link);
+// the quiz gets /#self. Transient views (gather, scoring) never become
+// entries. navGen invalidates in-flight flows when the user navigates away.
+let navGen = 0;
+
+function pushResult(fin, live) {
+  try {
+    history.pushState({ view: 'result', fin, live }, '', `/r/${fin.id}`);
+  } catch {}
+  renderResults(fin, live);
+}
+
+window.addEventListener('popstate', (e) => {
+  navGen++;
+  stopGather();
+  const st = e.state;
+  if (st && st.view === 'result' && st.fin) {
+    renderResults(st.fin, !!st.live);
+    return;
+  }
+  const m = location.pathname.match(/^\/r\/([0-9a-fA-F-]{8,})$/);
+  if (m) {
+    api(`/api/result/${m[1]}`)
+      .then((d) => renderResults(d, false))
+      .catch(() => show('landing'));
+    return;
+  }
+  // '/' and '/#self' both land back on the input (a half-finished quiz isn't
+  // resumable, and silently restarting one on Back would be stranger).
+  $('btn-diagnose').disabled = false;
+  show('landing');
+});
+
 // --- landing: diagnose an X account ----------------------------------------
 
 $('diag-form').addEventListener('submit', (e) => {
@@ -39,6 +74,7 @@ $('diag-form').addEventListener('submit', (e) => {
 });
 $('link-self').addEventListener('click', (e) => {
   e.preventDefault();
+  history.pushState({ view: 'quiz' }, '', '/#self');
   startSelfTest();
 });
 
@@ -53,6 +89,7 @@ async function runDiagnose() {
   }
   const btn = $('btn-diagnose');
   btn.disabled = true;
+  const gen = navGen;
   showGather(guessHandle(input));
   // One silent retry on upstream flake (the scoring provider 429s in waves;
   // a couple of seconds later usually succeeds) — the gather screen just
@@ -60,14 +97,17 @@ async function runDiagnose() {
   for (let attempt = 0; ; attempt++) {
     try {
       const d = await api('/api/diagnose', { input });
+      if (gen !== navGen) return; // user navigated away mid-diagnosis
       stopGather();
-      renderResults(d, true);
+      btn.disabled = false;
+      pushResult(d, true);
       return;
     } catch (err) {
       if (err.code === 'upstream' && attempt === 0) {
         await new Promise((r) => setTimeout(r, 2000));
         continue;
       }
+      if (gen !== navGen) return;
       stopGather();
       btn.disabled = false;
       show('landing');
@@ -230,13 +270,16 @@ function renderScoringProgress() {
 }
 
 async function finishFlow() {
+  const gen = navGen;
   show('scoring');
   renderScoringProgress();
   await Promise.allSettled(state.promises);
   try {
     const fin = await api('/api/finish', { session: state.session });
-    renderResults(fin, true);
+    if (gen !== navGen) return; // user navigated away mid-scoring
+    pushResult(fin, true);
   } catch (err) {
+    if (gen !== navGen) return;
     $('view-scoring').innerHTML =
       `<h2>scoring failed</h2><p class="fine">${err.message}. the models are being difficult. ` +
       `<a href="/" style="color:var(--accent)">try again</a>.</p>`;
@@ -504,10 +547,20 @@ api('/api/status')
   })
   .catch(() => {});
 
+const restored = history.state;
 const shared = location.pathname.match(/^\/r\/([0-9a-fA-F-]{8,})$/);
-if (shared) {
+if (restored && restored.view === 'result' && restored.fin) {
+  // Reload of a result we rendered this session: history.state survives
+  // refresh, so the taker keeps their live view (share button and all).
+  renderResults(restored.fin, !!restored.live);
+} else if (shared) {
   api(`/api/result/${shared[1]}`)
-    .then((d) => renderResults(d, false))
+    .then((d) => {
+      try {
+        history.replaceState({ view: 'result', fin: d, live: false }, '', location.pathname);
+      } catch {}
+      renderResults(d, false);
+    })
     .catch(() => {
       // Dead share link (expired/removed result): say so instead of silently
       // dumping the visitor on the homepage.
@@ -519,5 +572,14 @@ if (shared) {
 } else {
   show('landing');
   // Deep-link to the self-test (from "take it again" / "take the test yourself").
-  if (location.hash === '#self') startSelfTest();
+  if (location.hash === '#self') {
+    try {
+      history.replaceState({ view: 'quiz' }, '', '/#self');
+    } catch {}
+    startSelfTest();
+  } else {
+    try {
+      history.replaceState({ view: 'landing' }, '', location.pathname + location.search);
+    } catch {}
+  }
 }
