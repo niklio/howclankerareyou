@@ -51,6 +51,12 @@ type = "ratelimit"
 namespace_id = "1002"
 simple = { limit = 20, period = 60 }   # per-IP new sessions / minute
 
+[[unsafe.bindings]]
+name = "DIAGNOSE_RL"
+type = "ratelimit"
+namespace_id = "1003"
+simple = { limit = 6, period = 60 }    # per-IP account diagnoses / minute (scrape + 15 model calls each)
+
 [vars]
 # "1" forces the deterministic mock (src/mock.js). "0" uses real HF inference
 # via the HF_TOKEN secret. Live on real inference (HF PRO, $2/mo included credit).
