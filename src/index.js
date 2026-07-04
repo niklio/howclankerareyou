@@ -11,7 +11,7 @@ import {
   heatLevelText,
 } from './scoring.js';
 import { parseHandle, getUser, searchSamples, probeOriginals } from './twitter.js';
-import { parseRedditor, redditSamples } from './reddit.js';
+import { parseRedditor, redditSamples, probeSubmitted } from './reddit.js';
 import { ogImage } from './og.js';
 import * as auth from './auth.js';
 import { gatherAnalytics } from './analytics.js';
@@ -615,6 +615,25 @@ async function api(request, env, url, ctx) {
       // the warmup get rejected.
       const allWords = (raw || []).join(' ').split(/\s+/).filter(Boolean);
       if (allWords.length <= F_WARMUP + 1) {
+        // Reddit with a completely empty comments feed: disambiguate hidden
+        // history from genuine silence via the (public) posts feed.
+        if (platform === 'reddit' && counts.fetched === 0) {
+          const posts = await probeSubmitted(user.handle).catch(() => null);
+          if (posts > 0) {
+            return diag(
+              json({ error: `u/${user.handle} has posts but no publicly visible comments — reddit profiles can hide comment history. if that's you: reddit settings → profile → show your comments, then retry`, code: 'hidden', handle: user.handle }, 422),
+              'thin',
+              { handle: user.handle, pages: counts.pages, cause: 'hidden-comments' }
+            );
+          }
+          if (posts === 0) {
+            return diag(
+              json({ error: `u/${user.handle} has no public activity at all — private, brand new, or a champion lurker`, code: 'quiet', handle: user.handle }, 422),
+              'thin',
+              { handle: user.handle, pages: counts.pages, cause: 'no-activity' }
+            );
+          }
+        }
         const cause = await thinCause(env, user.handle, counts, platform);
         return diag(
           json({ error: `not enough public ${platform === 'reddit' ? 'comments' : 'posts'} to grade ${who(user.handle)} fairly`, code: 'thin', handle: user.handle, kept: samples.length }, 422),

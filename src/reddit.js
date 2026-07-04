@@ -72,6 +72,20 @@ function commentText(escapedHtml) {
 
 const wordCount = (s) => (s ? s.split(/\s+/).filter(Boolean).length : 0);
 
+// Empty-comments disambiguator: does the account have any public POSTS?
+// (about.json is bot-blocked; submitted.rss isn't.) Comments-empty + posts-
+// present usually means the profile hides comment history — a setting the
+// account owner can flip (observed in the wild: they do, then retry).
+export async function probeSubmitted(name) {
+  const res = await fetch(`https://www.reddit.com/user/${name}/submitted.rss`, {
+    headers: { 'user-agent': UA },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) return null; // unknown — caller falls back to the generic message
+  const xml = await res.text();
+  return xml.split('<entry>').length - 1;
+}
+
 // Fetch a redditor's most recent comments and clean them into scoreable
 // samples. Same interface as the X source: { user, samples, counts }; user is
 // null when the account doesn't exist (or is suspended — nothing to grade).

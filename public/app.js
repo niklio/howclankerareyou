@@ -147,6 +147,9 @@ function diagnoseErrorText(err) {
       return err.message + ' — this account is private, so we can’t read it. try a public one.';
     case 'thin':
       return err.message + ' — we need 5 recent ones of ~11+ words. try someone wordier.';
+    case 'hidden':
+    case 'quiet':
+      return err.message + '.';
     case 'blocked':
       return 'this account asked to be removed from the tool.';
     case 'ratelimited':
