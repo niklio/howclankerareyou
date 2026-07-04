@@ -225,18 +225,27 @@ export async function gatherAnalytics(env, range = 'week') {
     score: scoreByHandle[r.h] ?? null,
   }));
 
+  // Live feed: the most recent names ENTERED — every lookup (fresh, cached,
+  // failed), newest first. Event handles are already u/-prefixed for reddit;
+  // scores join from the latest stored result where a grade exists.
+  const recentEntries = (
+    await q(
+      `SELECT ${dOut('handle')} h, ${dOut('outcome')} o, ${dOut('cached')} c, ts t
+       FROM events WHERE type='diagnose' AND ${dOut('handle')} IS NOT NULL
+       ORDER BY ts DESC LIMIT 15`
+    )
+  ).map((r) => ({
+    handle: r.h,
+    outcome: r.o,
+    cached: truthy(r.c),
+    overall: r.o === 'success' ? scoreByHandle[r.h] ?? null : null,
+    at: r.t,
+  }));
+
   // Viral-loop CTA clicks (all-time).
   const ctaRows = await q(`SELECT meta, COUNT(*) n FROM events WHERE type='cta' GROUP BY meta`);
   const cta = Object.fromEntries(ctaRows.map((r) => [r.meta, r.n]));
 
-  // Live feed: the most recent account diagnoses (fresh results only — cache
-  // hits don't create rows, so this is genuinely "new grades").
-  const recentAccounts = (
-    await q(
-      `SELECT subject_handle h, overall, created_at t, COALESCE(subject_platform,'x') p
-       FROM results WHERE ${ACCT_COND} ORDER BY created_at DESC LIMIT 15`
-    )
-  ).map((r) => ({ handle: r.h, platform: r.p, overall: r.overall, at: r.t }));
 
   // --- budget (operational: today's cap + month-to-date, range-independent) ---
   const monthStart = today().slice(0, 8) + '01';
@@ -300,7 +309,7 @@ export async function gatherAnalytics(env, range = 'week') {
     funnel,
     scoreHistogram: hist,
     outcomes: outcomeRows.map((r) => ({ outcome: r.o || 'unknown', count: r.n })),
-    recentAccounts,
+    recentEntries,
     topHandles,
     cta,
     modelShare,

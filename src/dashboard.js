@@ -140,10 +140,12 @@ function render(d){
     '<div class="card"><h3>HF budget — '+d.budget.todayCalls+' / '+d.budget.dailyCap+' calls today ('+d.budget.capPct+'% of daily cap) · '+(d.budget.twitterPagesToday||0)+' twitterapi pages today · $'+h.spend+' spend in range</h3><div class="budget"><div style="width:'+budgetPct+'%"></div></div></div>'+
     '<div class="row grid">'+(d.healthPlots||[]).map(plot).join('')+'</div>'+
     // --- live feed: latest fresh account grades ---
-    '<div class="section"><span>recently diagnosed <span class="hint">· latest fresh grades, newest first</span></span></div>'+
-    '<div class="card">'+((d.recentAccounts||[]).length
-      ? bars(d.recentAccounts.map(a=>({l:(a.platform==='reddit'?'u/':'@')+a.handle+' · '+ago(a.at),v:a.overall})),'l','v',v=>v+'%')
-      : '<p class="muted">no account diagnoses yet</p>')+'</div>'+
+    '<div class="section"><span>recently diagnosed <span class="hint">· latest names entered — fresh, cached, and failed lookups</span></span></div>'+
+    '<div class="card">'+((d.recentEntries||[]).length
+      ? bars(d.recentEntries.map(e=>({
+          l:(e.handle.indexOf('u/')===0?'':'@')+e.handle+' · '+ago(e.at)+(e.outcome!=='success'?' · '+e.outcome:(e.cached?' · cached':'')),
+          v:e.overall||0})),'l','v',v=>v?v+'%':'—')
+      : '<p class="muted">no lookups yet</p>')+'</div>'+
     // --- details (all-time) ---
     '<div class="section"><span>details <span class="hint">· all time</span></span></div><div class="row grid">'+
       '<div class="card"><h3>Play mix</h3>'+bars(mix.map(m=>({l:m.label,v:m.count})),'l','v')+'</div>'+
