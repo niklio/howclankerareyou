@@ -478,6 +478,9 @@ async function api(request, env, url, ctx) {
     )
       .bind(sessionId, Date.now(), overall, JSON.stringify(perModel), JSON.stringify(grid))
       .run();
+    // Self-test plays need a visitor-hashed event too, or they're invisible to
+    // the unique-players (DAU) count — diagnose plays get theirs via diag().
+    logEvent(env, ctx, request, 'selftest', { session: sessionId });
     return json({
       id: sessionId,
       overall,

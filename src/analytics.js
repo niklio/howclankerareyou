@@ -145,6 +145,23 @@ export async function gatherAnalytics(env, range = 'week') {
     `SELECT COUNT(DISTINCT visitor) n FROM events WHERE type='pageview' AND ${cond('ts')}`
   );
   const totalUniques = uqRow[0]?.n || 0;
+  // Unique players (the DAU metric on the day view): distinct visitors who
+  // produced a result — diagnose successes + self-test finishes, both
+  // visitor-hashed events. Self-test events only exist from the first
+  // `selftest` row onward; self plays before that boundary (results rows)
+  // are added NON-unique rather than vanishing. The boundary is
+  // self-maintaining: every finish after the logging deploy writes both a
+  // results row and an event, so nothing is double-counted.
+  const selfLogStart = (await q(`SELECT MIN(ts) m FROM events WHERE type='selftest'`))[0]?.m;
+  const playerRow = await q(
+    `SELECT COUNT(DISTINCT visitor) n FROM events
+     WHERE ((type='diagnose' AND ${dOut('outcome')}='success') OR type='selftest') AND ${cond('ts')}`
+  );
+  const preLogSelfRow = await q(
+    `SELECT COUNT(*) n FROM results WHERE ${SELF_COND}
+     AND created_at < ${selfLogStart ?? Number.MAX_SAFE_INTEGER} AND ${cond('created_at')}`
+  );
+  const totalPlayers = (playerRow[0]?.n || 0) + (preLogSelfRow[0]?.n || 0);
   const plays = keys.map((k, i) => [k, diagSuccess[i][1] + completed[i][1]]);
   const totalPlays = totalDiagSuccess + totalCompleted;
   const replayRows = await q(
@@ -278,6 +295,7 @@ export async function gatherAnalytics(env, range = 'week') {
     // The loop, as a funnel (windowed).
     loop: [
       { stage: 'unique visitors', n: totalUniques },
+      { stage: 'unique players', n: totalPlayers },
       { stage: 'plays (result created)', n: totalPlays },
       { stage: 'shares', n: totalShares },
       { stage: 'share-link opens', n: totalResultViews },

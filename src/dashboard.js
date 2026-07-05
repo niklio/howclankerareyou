@@ -128,6 +128,7 @@ function render(d){
     // sub-label carrying the conversion from the previous stage.
     '<div class="row stats">'+
       stat(fmt(loopN('unique visitors')),'unique visitors')+
+      stat(fmt(loopN('unique players')),'unique players','played ≥1 time')+
       stat(fmt(h.plays),'plays',h.playsAccount+' acct · '+h.playsSelf+' self · '+h.playRate+'% of visitors')+
       stat(fmt(loopN('shares')),'shares',h.shareRate+'% of plays')+
       stat(fmt(loopN('share-link opens')),'share-link opens',h.opensPerShare+' per share')+
