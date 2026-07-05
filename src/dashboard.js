@@ -48,11 +48,13 @@ main{max-width:1080px;margin:0 auto;padding:14px 14px 64px}
 .section{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;
   color:var(--dim);margin:26px 4px 10px}
 .section .hint{font-weight:400;text-transform:none;letter-spacing:0}
-svg.chart{display:block;width:100%;height:auto}
+svg.chart{display:block;width:100%;height:auto;touch-action:pan-y}
 .chart .axis{stroke:var(--line)}
 .chart .area{fill:var(--accent);opacity:.08}
 .chart .line{fill:none;stroke:var(--accent);stroke-width:2}
 .chart .dot{fill:var(--accent)}
+.chart .hline{stroke:var(--dim);stroke-dasharray:3 3}
+.chart .hdot{fill:var(--accent);stroke:var(--card);stroke-width:1.5}
 .chart text{fill:var(--dim);font-size:10px}
 .bar{display:flex;align-items:center;gap:10px;margin:7px 0;font-size:13px;min-height:20px}
 .bar .lab{width:47%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -81,24 +83,60 @@ function login(){
     '<a class="btn" href="https://howclankerareyou.com/auth/google?next='+next+'">Sign in with Google</a></div>';
 }
 
+// Chart geometry, shared with the hover-scrub wiring in wireCharts().
+const CW=360,CH=130,CP=22;
+const chartX=(i,n)=>CP+(n<=1?0:i*(CW-2*CP)/(n-1));
+const chartY=(v,max)=>CH-CP-(v/max)*(CH-2*CP-10);
+const bucketLab=(k)=>!k?'':(k.includes(' ')?k.slice(11)+':00':k.slice(5));
 function lineChart(series){
-  const W=360,H=130,pad=22,n=series.length;
+  const n=series.length;
   const vals=series.map(p=>p[1]),max=Math.max(1,...vals);
-  const x=i=>pad+(n<=1?0:i*(W-2*pad)/(n-1)), y=v=>H-pad-(v/max)*(H-2*pad-10);
-  const pts=series.map((p,i)=>x(i).toFixed(1)+','+y(p[1]).toFixed(1)).join(' ');
-  const area=pad+','+(H-pad)+' '+pts+' '+x(n-1).toFixed(1)+','+(H-pad);
-  const lab=k=>!k?'':(k.includes(' ')?k.slice(11)+':00':k.slice(5));
-  const d0=series[0]?lab(series[0][0]):'', d1=series[n-1]?lab(series[n-1][0]):'';
-  const lx=x(n-1).toFixed(1), ly=series[n-1]?y(series[n-1][1]).toFixed(1):0;
-  return '<svg viewBox="0 0 '+W+' '+H+'" class="chart">'+
-    '<line class="axis" x1="'+pad+'" y1="'+(H-pad)+'" x2="'+(W-pad)+'" y2="'+(H-pad)+'"/>'+
+  const pts=series.map((p,i)=>chartX(i,n).toFixed(1)+','+chartY(p[1],max).toFixed(1)).join(' ');
+  const area=CP+','+(CH-CP)+' '+pts+' '+chartX(n-1,n).toFixed(1)+','+(CH-CP);
+  const d0=series[0]?bucketLab(series[0][0]):'', d1=series[n-1]?bucketLab(series[n-1][0]):'';
+  const lx=chartX(n-1,n).toFixed(1), ly=series[n-1]?chartY(series[n-1][1],max).toFixed(1):0;
+  return '<svg viewBox="0 0 '+CW+' '+CH+'" class="chart">'+
+    '<line class="axis" x1="'+CP+'" y1="'+(CH-CP)+'" x2="'+(CW-CP)+'" y2="'+(CH-CP)+'"/>'+
     '<polygon class="area" points="'+area+'"/>'+
     '<polyline class="line" points="'+pts+'"/>'+
     (n?'<circle class="dot" cx="'+lx+'" cy="'+ly+'" r="3"/>':'')+
-    '<text x="'+pad+'" y="12">max '+fmt(max)+'</text>'+
-    '<text x="'+pad+'" y="'+(H-6)+'">'+d0+'</text>'+
-    '<text x="'+(W-pad)+'" y="'+(H-6)+'" text-anchor="end">'+d1+'</text>'+
+    '<line class="hline" y1="10" y2="'+(CH-CP)+'" style="display:none"/>'+
+    '<circle class="hdot" r="4" style="display:none"/>'+
+    '<text x="'+CP+'" y="12">max '+fmt(max)+'</text>'+
+    '<text x="'+CP+'" y="'+(CH-6)+'">'+d0+'</text>'+
+    '<text x="'+(CW-CP)+'" y="'+(CH-6)+'" text-anchor="end">'+d1+'</text>'+
     '</svg>';
+}
+// Scrubbing: pointer over a chart swaps the header number for the hovered
+// bucket's value (with a guide line + dot); leaving restores the aggregate.
+// touch-action:pan-y keeps vertical page scroll free while a horizontal
+// finger drag scrubs.
+function wireCharts(){
+  document.querySelectorAll('.card.plot').forEach(card=>{
+    const svg=card.querySelector('svg.chart');
+    const b=card.querySelector('h3 .v');
+    if(!svg||!b) return;
+    let series=[]; try{series=JSON.parse(card.dataset.s||'[]');}catch(e){}
+    const n=series.length; if(!n) return;
+    const agg=card.dataset.agg, unit=card.dataset.u||'';
+    const max=Math.max(1,...series.map(p=>p[1]));
+    const gl=svg.querySelector('.hline'), gd=svg.querySelector('.hdot');
+    const show=(clientX)=>{
+      const r=svg.getBoundingClientRect();
+      const vx=(clientX-r.left)/r.width*CW;
+      let i=Math.round((vx-CP)/((CW-2*CP)/(n<=1?1:n-1)));
+      i=Math.max(0,Math.min(n-1,i));
+      const x=chartX(i,n);
+      gl.setAttribute('x1',x); gl.setAttribute('x2',x); gl.style.display='';
+      gd.setAttribute('cx',x); gd.setAttribute('cy',chartY(series[i][1],max)); gd.style.display='';
+      b.textContent=bucketLab(series[i][0])+' · '+fmt(series[i][1])+unit;
+    };
+    const hide=()=>{gl.style.display='none';gd.style.display='none';b.textContent=agg;};
+    svg.addEventListener('pointermove',e=>show(e.clientX));
+    svg.addEventListener('pointerdown',e=>show(e.clientX));
+    svg.addEventListener('pointerleave',hide);
+    svg.addEventListener('pointercancel',hide);
+  });
 }
 function bars(items,labelKey,valKey,fmtv){
   const max=Math.max(1,...items.map(i=>i[valKey]));
@@ -125,9 +163,11 @@ function render(d){
     const isLat=p.label.indexOf('latency')>=0;
     // p.total overrides the naive per-bucket sum for non-additive metrics
     // (uniques: DISTINCT can't be summed across buckets). p.note appends
-    // extra context (play-through rates) after the aggregate.
+    // extra context (play-through rates) after the aggregate. data-s/agg/u
+    // feed the hover scrubbing in wireCharts().
     const agg=isLat?('max '+fmt(Math.max(0,...p.series.map(x=>x[1])))+' ms'):(fmt(p.total!=null?p.total:sum(p.series))+tail);
-    return '<div class="card"><h3>'+esc(p.label)+' · <b>'+agg+'</b>'+(p.note?' · '+esc(p.note):'')+'</h3>'+lineChart(p.series)+'</div>';
+    return '<div class="card plot" data-s="'+esc(JSON.stringify(p.series))+'" data-agg="'+esc(agg)+'"'+(isLat?' data-u=" ms"':'')+'>'+
+      '<h3>'+esc(p.label)+' · <b class="v">'+agg+'</b>'+(p.note?' · '+esc(p.note):'')+'</h3>'+lineChart(p.series)+'</div>';
   };
   const section=(name,hint)=>'<div class="section">'+name+' <span class="hint">'+(RLABEL[d.range]||'')+(hint?' '+hint:'')+'</span></div>';
   const t=d.topbar,a=d.acquisition,g=d.engagement,h=d.health,dt=d.details;
@@ -178,6 +218,7 @@ function render(d){
     '<p class="muted" style="margin-top:20px">updated '+new Date(d.updated).toLocaleString()+' · '+esc(EMAIL)+'</p>'+
     '</main>';
   document.getElementById('range').addEventListener('click',e=>{const b=e.target.closest('button');if(b)load(b.dataset.r);});
+  wireCharts();
 }
 
 async function load(range){
