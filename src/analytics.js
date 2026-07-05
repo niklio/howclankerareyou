@@ -80,8 +80,8 @@ export async function gatherAnalytics(env, range = 'week') {
   const started = await seriesQ(`SELECT ${bucket('created_at')} d, COUNT(*) n FROM sessions WHERE ${cond('created_at')} GROUP BY d`);
   const completed = await seriesQ(`SELECT ${bucket('created_at')} d, COUNT(*) n FROM results WHERE ${SELF_COND} AND ${cond('created_at')} GROUP BY d`);
   const pageviews = await seriesQ(`SELECT ${bucket('ts')} d, COUNT(*) n FROM events WHERE type='pageview' AND ${cond('ts')} GROUP BY d`);
-  const uniques = await seriesQ(`SELECT ${bucket('ts')} d, COUNT(DISTINCT visitor) n FROM events WHERE type='pageview' AND ${cond('ts')} GROUP BY d`);
   const resultViews = await seriesQ(`SELECT ${bucket('ts')} d, COUNT(*) n FROM events WHERE type='result_view' AND ${cond('ts')} GROUP BY d`);
+  const rateLimited = await seriesQ(`SELECT ${bucket('ts')} d, COUNT(*) n FROM events WHERE type='ratelimited' AND ${cond('ts')} GROUP BY d`);
   const shares = await seriesQ(`SELECT ${bucket('ts')} d, COUNT(*) n FROM events WHERE type='share' AND ${cond('ts')} GROUP BY d`);
   const calls = await seriesQ(`SELECT ${bucket('s.created_at')} d, SUM(steps) n FROM answers a JOIN sessions s ON a.session_id=s.id WHERE ${cond('s.created_at')} GROUP BY d`);
 
@@ -127,53 +127,98 @@ export async function gatherAnalytics(env, range = 'week') {
   }
   const spendSeries = keys.map((k) => [k, Math.round((spendBy[k] || 0) * 1e6) / 1e6]);
 
-  // --- the loop (windowed sums) ---
-  // One viral loop, two flavors of "play": diagnosing an account and taking
-  // the self-test both produce a shareable result. visitors → plays → shares
-  // → share opens → replays (result-page CTA clicks back into a new play).
+  // --- windowed sums ---
   const totalStarted = sum(started);
   const totalCompleted = sum(completed);
   const totalShares = sum(shares);
-  const totalResultViews = sum(resultViews);
   const totalDiagAttempts = sum(diagAttempts);
   const totalDiagSuccess = sum(diagSuccess);
+  const plays = keys.map((k, i) => [k, diagSuccess[i][1] + completed[i][1]]);
+  const totalPlays = totalDiagSuccess + totalCompleted;
+  // Visits = homepage loads + share-page opens; play flavors split off dRows.
+  const visits = keys.map((k, i) => [k, pageviews[i][1] + resultViews[i][1]]);
+  const xPlays = fillK(aggCount(dRows, (r) => r.outcome === 'success' && r.plat !== 'reddit'));
+  const redditPlays = fillK(aggCount(dRows, (r) => r.outcome === 'success' && r.plat === 'reddit'));
+
+  // --- uniques + first-touch attribution (one windowed event pull) ---------
   // DISTINCT doesn't sum across buckets (one visitor active in 6 hourly
-  // buckets would count 6× in the day view but ~1× in the week view — the
-  // classic "day > week" artifact). The true total is one DISTINCT over the
-  // whole window; the per-bucket series stays for the chart shape only.
-  const uqRow = await q(
-    `SELECT COUNT(DISTINCT visitor) n FROM events WHERE type='pageview' AND ${cond('ts')}`
+  // buckets would count 6× in the day view but ~1× in the week view), so
+  // per-bucket sets chart the shape and window-wide sets give the totals.
+  // First-touch attribution: a visitor whose earliest visit event in the
+  // window is a result_view arrived via a share link; everyone else — incl.
+  // players with no visit event at all — counts as homepage.
+  // json_extract throws on non-JSON meta (result_view stores a bare key),
+  // so only reach into meta on diagnose rows.
+  const evRows = await q(
+    `SELECT ts, type, visitor,
+            CASE WHEN type='diagnose' THEN ${dOut('outcome')} END o
+     FROM events
+     WHERE type IN ('pageview','result_view','diagnose','selftest') AND ${cond('ts')}`
   );
-  const totalUniques = uqRow[0]?.n || 0;
-  // Unique players (the DAU metric on the day view): distinct visitors who
-  // produced a result — diagnose successes + self-test finishes, both
-  // visitor-hashed events. Self-test events only exist from the first
-  // `selftest` row onward; self plays before that boundary (results rows)
-  // are added NON-unique rather than vanishing. The boundary is
-  // self-maintaining: every finish after the logging deploy writes both a
-  // results row and an event, so nothing is double-counted.
+  const bkey =
+    range === 'day'
+      ? (ms) => new Date(ms).toISOString().slice(0, 13).replace('T', ' ')
+      : (ms) => new Date(ms).toISOString().slice(0, 10);
+  const isPlayEv = (e) => e.type === 'selftest' || (e.type === 'diagnose' && e.o === 'success');
+  const uvB = {}, upB = {}, uvAll = new Set(), first = {};
+  for (const e of evRows) {
+    if (!e.visitor) continue;
+    if (e.type === 'pageview' || e.type === 'result_view') {
+      (uvB[bkey(e.ts)] ||= new Set()).add(e.visitor);
+      uvAll.add(e.visitor);
+      if (!first[e.visitor] || e.ts < first[e.visitor].ts) first[e.visitor] = { ts: e.ts, type: e.type };
+    } else if (isPlayEv(e)) {
+      (upB[bkey(e.ts)] ||= new Set()).add(e.visitor);
+    }
+  }
+  const uniqueVisits = keys.map((k) => [k, uvB[k]?.size || 0]);
+  const totalUniqueVisits = uvAll.size;
+  const pfsB = {}, pfhB = {};
+  const shareVisitors = new Set(), homeVisitors = new Set(), sharePlayers = new Set(), homePlayers = new Set();
+  for (const v of Object.keys(first)) (first[v].type === 'result_view' ? shareVisitors : homeVisitors).add(v);
+  for (const e of evRows) {
+    if (!isPlayEv(e) || !e.visitor) continue;
+    if (first[e.visitor]?.type === 'result_view') {
+      pfsB[bkey(e.ts)] = (pfsB[bkey(e.ts)] || 0) + 1;
+      sharePlayers.add(e.visitor);
+    } else {
+      pfhB[bkey(e.ts)] = (pfhB[bkey(e.ts)] || 0) + 1;
+      homePlayers.add(e.visitor);
+      homeVisitors.add(e.visitor);
+    }
+  }
+  const playsFromShare = keys.map((k) => [k, pfsB[k] || 0]);
+  const playsFromHome = keys.map((k) => [k, pfhB[k] || 0]);
+  // play-through = % of that source's distinct visitors who went on to play.
+  const ptShare = shareVisitors.size ? Math.round((100 * sharePlayers.size) / shareVisitors.size) : 0;
+  const ptHome = homeVisitors.size ? Math.round((100 * homePlayers.size) / homeVisitors.size) : 0;
+
+  // Unique players (DAU on the day view): distinct visitors who produced a
+  // result — diagnose successes + self-test finishes, both visitor-hashed
+  // events. Self-test events only exist from the first `selftest` row onward;
+  // self plays before that boundary (results rows) are added NON-unique
+  // rather than vanishing. The boundary is self-maintaining: every finish
+  // after the logging deploy writes both a results row and an event.
   const selfLogStart = (await q(`SELECT MIN(ts) m FROM events WHERE type='selftest'`))[0]?.m;
   const playerRow = await q(
     `SELECT COUNT(DISTINCT visitor) n FROM events
      WHERE ((type='diagnose' AND ${dOut('outcome')}='success') OR type='selftest') AND ${cond('ts')}`
   );
-  const preLogSelfRow = await q(
-    `SELECT COUNT(*) n FROM results WHERE ${SELF_COND}
-     AND created_at < ${selfLogStart ?? Number.MAX_SAFE_INTEGER} AND ${cond('created_at')}`
+  const preLogSelf = await seriesQ(
+    `SELECT ${bucket('created_at')} d, COUNT(*) n FROM results WHERE ${SELF_COND}
+     AND created_at < ${selfLogStart ?? Number.MAX_SAFE_INTEGER} AND ${cond('created_at')} GROUP BY d`
   );
-  const totalPlayers = (playerRow[0]?.n || 0) + (preLogSelfRow[0]?.n || 0);
-  const plays = keys.map((k, i) => [k, diagSuccess[i][1] + completed[i][1]]);
-  const totalPlays = totalDiagSuccess + totalCompleted;
-  const replayRows = await q(
-    `SELECT COUNT(*) n FROM events WHERE type='cta' AND ${cond('ts')}`
-  );
-  const totalReplays = replayRows[0]?.n || 0;
-  const playRate = totalUniques ? totalPlays / totalUniques : 0;
-  const shareRate = totalPlays ? totalShares / totalPlays : 0;
-  const opensPerShare = totalShares ? totalResultViews / totalShares : 0;
-  // Estimated viral coefficient: new plays a play generates via sharing.
-  // K = P(share) × opens per share × P(opened → plays). >1 = self-sustaining.
-  const kViral = shareRate * opensPerShare * playRate;
+  const totalPlayers = (playerRow[0]?.n || 0) + sum(preLogSelf);
+  const uniquePlays = keys.map((k, i) => [k, (upB[k]?.size || 0) + preLogSelf[i][1]]);
+
+  // Top share links: which /r/ pages actually pull visitors in (windowed).
+  const topShareLinks = (
+    await q(
+      `SELECT meta k, COUNT(*) n FROM events
+       WHERE type='result_view' AND meta IS NOT NULL AND ${cond('ts')}
+       GROUP BY k ORDER BY n DESC LIMIT 10`
+    )
+  ).map((r) => ({ link: '/r/' + r.k, opens: r.n }));
 
   // --- breakdowns (all-time) ---
   const funnelRows = await q(`SELECT question_id, COUNT(DISTINCT session_id) n FROM answers GROUP BY question_id`);
@@ -208,7 +253,7 @@ export async function gatherAnalytics(env, range = 'week') {
   }
   const modelShare = Object.entries(modelCount).map(([label, count]) => ({ label, count }));
   const referrers = await q(
-    `SELECT COALESCE(ref,'direct') ref, COUNT(*) n FROM events WHERE type='pageview' GROUP BY ref ORDER BY n DESC LIMIT 10`
+    `SELECT COALESCE(ref,'direct') ref, COUNT(*) n FROM events WHERE type='pageview' AND ${cond('ts')} GROUP BY ref ORDER BY n DESC LIMIT 10`
   );
 
   // Diagnose outcome mix (all-time) + most-diagnosed handles. Lookup counts
@@ -259,11 +304,6 @@ export async function gatherAnalytics(env, range = 'week') {
     at: r.t,
   }));
 
-  // Viral-loop CTA clicks (all-time).
-  const ctaRows = await q(`SELECT meta, COUNT(*) n FROM events WHERE type='cta' GROUP BY meta`);
-  const cta = Object.fromEntries(ctaRows.map((r) => [r.meta, r.n]));
-
-
   // --- budget (operational: today's cap + month-to-date, range-independent) ---
   const monthStart = today().slice(0, 8) + '01';
   const mtdCallsRow = await q(`SELECT SUM(steps) n FROM answers a JOIN sessions s ON a.session_id=s.id WHERE ${dayExpr('s.created_at')} >= '${monthStart}'`);
@@ -282,64 +322,68 @@ export async function gatherAnalytics(env, range = 'week') {
   return {
     updated: new Date().toISOString(),
     range,
-    headline: {
-      kViral: Math.round(kViral * 100) / 100,
+    // Top bar: audience size and how hard the players play. Ratios are per
+    // unique player (DAU on the day view) — immune to lurker inflation.
+    topbar: {
+      uniqueVisits: totalUniqueVisits,
+      dau: totalPlayers,
       plays: totalPlays,
-      playsAccount: totalDiagSuccess,
-      playsSelf: totalCompleted,
-      playRate: Math.round(100 * playRate),
-      shareRate: Math.round(100 * shareRate),
-      opensPerShare: Math.round(100 * opensPerShare) / 100,
-      spend: Math.round(sum(spendSeries) * 100) / 100,
+      shares: totalShares,
+      playsPerDau: totalPlayers ? Math.round((100 * totalPlays) / totalPlayers) / 100 : 0,
+      sharesPerDau: totalPlayers ? Math.round((100 * totalShares) / totalPlayers) / 100 : 0,
     },
-    // The loop, as a funnel (windowed).
-    loop: [
-      { stage: 'unique visitors', n: totalUniques },
-      { stage: 'unique players', n: totalPlayers },
-      { stage: 'plays (result created)', n: totalPlays },
-      { stage: 'shares', n: totalShares },
-      { stage: 'share-link opens', n: totalResultViews },
-      { stage: 'replays (CTA back in)', n: totalReplays },
-    ],
-    plots: [
-      { label: 'Plays', series: plays },
-      { label: 'Unique visitors', series: uniques, total: totalUniques },
-      { label: 'Share actions', series: shares },
-      { label: 'Share-link opens', series: resultViews },
-    ],
-    healthPlots: [
-      { label: 'Diagnose latency p50 (ms)', series: latP50 },
-      { label: 'Diagnose latency p90 (ms)', series: latP90 },
-      { label: 'Upstream failures', series: diagUpstream },
-      { label: 'Diagnoses (attempts)', series: diagAttempts },
-      { label: 'Page views', series: pageviews },
-      { label: 'Estimated spend ($)', series: spendSeries },
-    ],
-    playMix: [
-      { label: 'diagnose an X account', count: allTimeAccountsX },
-      { label: 'diagnose a redditor', count: allTimeAccountsReddit },
-      { label: 'self-test', count: allTimeSelf },
-    ],
-    diagnoseSuccessRate: totalDiagAttempts
-      ? Math.round((100 * totalDiagSuccess) / totalDiagAttempts)
-      : 100,
-    selfCompletionRate: totalStarted ? Math.round((100 * totalCompleted) / totalStarted) : 0,
-    funnel,
-    scoreHistogram: hist,
-    outcomes: outcomeRows.map((r) => ({ outcome: r.o || 'unknown', count: r.n })),
-    recentEntries,
-    topHandles,
-    cta,
-    modelShare,
-    questionClanker,
-    referrers: referrers.map((r) => ({ ref: r.ref, count: r.n })),
-    budget: {
-      mtdCalls: mtdCallsRow[0]?.n || 0,
-      mtdSpend: Math.round(mtdSpend * 100) / 100,
-      dailyCap: cap,
-      todayCalls: capRow[0]?.calls || 0,
-      capPct: cap ? Math.round((100 * (capRow[0]?.calls || 0)) / cap) : 0,
-      twitterPagesToday: twRow[0]?.n || 0,
+    acquisition: {
+      plots: [
+        { label: 'Unique visits', series: uniqueVisits, total: totalUniqueVisits },
+        { label: 'Visits', series: visits },
+        { label: 'Homepage visits', series: pageviews },
+        { label: 'Share page visits', series: resultViews },
+      ],
+      referrers: referrers.map((r) => ({ ref: r.ref, count: r.n })),
+      topShareLinks,
+    },
+    engagement: {
+      plots: [
+        { label: 'Unique plays', series: uniquePlays, total: totalPlayers },
+        { label: 'Total plays', series: plays },
+        { label: 'Twitter plays', series: xPlays },
+        { label: 'Reddit plays', series: redditPlays },
+        { label: 'Self plays', series: completed },
+        { label: 'Plays from share page', series: playsFromShare, note: ptShare + '% play-through' },
+        { label: 'Plays from homepage', series: playsFromHome, note: ptHome + '% play-through' },
+      ],
+    },
+    health: {
+      diagnoseSuccessRate: totalDiagAttempts
+        ? Math.round((100 * totalDiagSuccess) / totalDiagAttempts)
+        : 100,
+      selfCompletionRate: totalStarted ? Math.round((100 * totalCompleted) / totalStarted) : 0,
+      spend: Math.round(sum(spendSeries) * 100) / 100,
+      plots: [
+        { label: 'Diagnose latency p50 (ms)', series: latP50 },
+        { label: 'Diagnose latency p90 (ms)', series: latP90 },
+        { label: 'Upstream failures', series: diagUpstream },
+        { label: 'Diagnoses (attempts)', series: diagAttempts },
+        { label: 'Rate-limited requests', series: rateLimited },
+        { label: 'Estimated spend ($)', series: spendSeries },
+      ],
+      outcomes: outcomeRows.map((r) => ({ outcome: r.o || 'unknown', count: r.n })),
+      budget: {
+        mtdCalls: mtdCallsRow[0]?.n || 0,
+        mtdSpend: Math.round(mtdSpend * 100) / 100,
+        dailyCap: cap,
+        todayCalls: capRow[0]?.calls || 0,
+        capPct: cap ? Math.round((100 * (capRow[0]?.calls || 0)) / cap) : 0,
+        twitterPagesToday: twRow[0]?.n || 0,
+      },
+    },
+    details: {
+      recentEntries,
+      topHandles,
+      scoreHistogram: hist,
+      modelShare,
+      questionClanker,
+      funnel,
     },
   };
 }
