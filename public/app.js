@@ -462,14 +462,14 @@ function wireResultButtons(fin, grid, url, live, acct) {
   if (acct) {
     // Account result CTAs depend on the audience: the diagnoser just made
     // something worth showing off → share leads (primary). A share-link
-    // visitor hasn't played yet → "diagnose someone else" leads (primary,
-    // first) and share demotes to secondary.
+    // visitor hasn't played yet → "diagnose someone" leads (primary, first;
+    // no "else" — they haven't diagnosed anyone) and share demotes to secondary.
     const visitor = !live;
     share.classList.toggle('big', !visitor);
     share.textContent = visitor ? 'share result' : 'share result ▶';
     share.style.order = visitor ? '2' : '1';
     diagAgain.classList.toggle('big', visitor);
-    diagAgain.textContent = visitor ? 'diagnose someone else ▶' : 'diagnose someone else';
+    diagAgain.textContent = visitor ? 'diagnose someone ▶' : 'diagnose someone else';
     diagAgain.style.order = visitor ? '1' : '2';
     if (hasGrid) {
       share.hidden = false;
