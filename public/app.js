@@ -342,11 +342,9 @@ function renderResults(fin, live) {
   const whom = reddit ? `u/${handle}` : `@${handle}`;
   const thinAcct = acct && fin.grid && fin.grid.length > 0 && fin.grid[0].cells.length === 10;
   if (acct) {
-    const cachedNote = fin.cached ? ' · graded earlier this week' : '';
     const profile = reddit ? `https://www.reddit.com/user/${esc(handle)}` : `https://x.com/${esc(handle)}`;
     $('res-context').innerHTML =
-      `graded from public ${reddit ? 'comments on reddit' : 'posts on X'} · <a href="${profile}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(whom)}</a>` +
-      cachedNote;
+      `graded from public ${reddit ? 'comments on reddit' : 'posts on X'} · <a href="${profile}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(whom)}</a>`;
     $('res-score').textContent = `${fin.overall}%`;
     $('res-score').previousSibling.textContent = `${whom} is `;
     const quip0 = ACCOUNT_VERDICTS.find(([min]) => fin.overall >= min)[1];
