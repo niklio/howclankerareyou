@@ -239,6 +239,9 @@ function safeNext(n) {
 // --- event logging (fire-and-forget) ---------------------------------------
 
 function logEvent(env, ctx, request, type, extra = {}) {
+  // Operator/dev traffic opts out of analytics with ?__nolog on the URL (curl
+  // tests, agent diagnoses run for ammo, etc.) so the dashboard stays real users.
+  try { if (new URL(request.url).searchParams.has('__nolog')) return; } catch {}
   const p = (async () => {
     try {
       await env.DB.prepare(
