@@ -484,6 +484,7 @@ async function api(request, env, url, ctx) {
       perModel,
       grid,
       percentile: await percentile(env, overall, 'self'),
+      distribution: await scoreDistribution(env, 'self'),
     });
   }
 
@@ -558,6 +559,7 @@ async function api(request, env, url, ctx) {
           grid,
           sources: cached.sources ? JSON.parse(cached.sources) : [],
           percentile: await percentile(env, cached.overall, 'account'),
+          distribution: await scoreDistribution(env, 'account'),
           cached: true,
           subject: {
             type: 'account',
@@ -713,6 +715,7 @@ async function api(request, env, url, ctx) {
         grid,
         sources,
         percentile: await percentile(env, overall, 'account'),
+        distribution: await scoreDistribution(env, 'account'),
         subject: {
           type: 'account',
           platform,
@@ -823,6 +826,7 @@ async function api(request, env, url, ctx) {
       grid,
       sources,
       percentile: await percentile(env, overall, 'account'),
+      distribution: await scoreDistribution(env, 'account'),
       subject: {
         type: 'account',
         platform,
@@ -881,6 +885,7 @@ async function api(request, env, url, ctx) {
       perModel: JSON.parse(row.per_model),
       grid: row.grid ? JSON.parse(row.grid) : null,
       percentile: await percentile(env, row.overall, row.subject_type === 'account' ? 'account' : 'self'),
+      distribution: await scoreDistribution(env, row.subject_type === 'account' ? 'account' : 'self'),
     };
     if (row.subject_type === 'account') {
       out.subject = {
@@ -1038,6 +1043,24 @@ async function overDailyCap(env) {
   if (!cap) return false;
   const calls = await addUsage(env, 1);
   return calls != null && calls > cap;
+}
+
+// Normalized 10-bucket score distribution for a population — SHARES of the
+// population per bucket (3dp), never counts, so result pages can draw the
+// curve without disclosing usage volume.
+async function scoreDistribution(env, subjectType = 'self') {
+  const cond =
+    subjectType === 'account'
+      ? `subject_type = 'account'`
+      : `(subject_type IS NULL OR subject_type = 'self')`;
+  const rows =
+    (await env.DB.prepare(
+      `SELECT MIN(CAST(overall/10 AS INTEGER), 9) b, COUNT(*) n FROM results WHERE ${cond} GROUP BY b`
+    ).all()).results || [];
+  const total = rows.reduce((s, r) => s + r.n, 0) || 1;
+  const out = Array(10).fill(0);
+  for (const r of rows) out[r.b] = Math.round((1000 * r.n) / total) / 1000;
+  return out;
 }
 
 // Share of other finished runs strictly less clanker than this score, compared

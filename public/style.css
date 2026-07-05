@@ -295,3 +295,22 @@ h2 {
   .tag { margin-bottom: 16px; }
   .title { margin-bottom: 10px; }
 }
+
+/* ---- result page brand header + percentile distribution ---- */
+.res-brand {
+  display: inline-block;
+  font-family: "Orbitron", sans-serif;
+  font-weight: 900;
+  text-transform: uppercase;
+  font-size: clamp(17px, 4.2vw, 26px);
+  letter-spacing: 0.02em;
+  color: var(--fg);
+  text-decoration: none;
+  text-shadow: 2px 0 var(--good), -2px 0 var(--accent);
+  margin-bottom: 14px;
+}
+#res-percentile { margin-bottom: 4px; }
+.dist { display: flex; align-items: flex-end; gap: 4px; height: 60px; max-width: 440px; margin: 8px 0 4px; }
+.dist span { flex: 1; background: var(--line); border-radius: 3px 3px 0 0; }
+.dist span.me { background: var(--accent); }
+.dist-x { display: flex; justify-content: space-between; max-width: 440px; font-size: 11px; color: var(--dim); margin-bottom: 12px; }

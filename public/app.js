@@ -385,6 +385,20 @@ function renderResults(fin, live) {
       )
       .join('');
 
+  // Percentile distribution: bucket SHARES from the server (no counts, no
+  // axis) — pure shape, with the subject's bucket highlighted.
+  const dist = fin.distribution;
+  if (dist && dist.length === 10) {
+    const mx = Math.max(...dist, 0.001);
+    const mine = Math.min(9, Math.floor(fin.overall / 10));
+    $('res-dist').innerHTML =
+      '<div class="dist">' +
+      dist.map((v, i) => `<span class="${i === mine ? 'me' : ''}" style="height:${Math.max(6, (100 * v) / mx)}%"></span>`).join('') +
+      '</div><div class="dist-x"><span>0% clanker</span><span>100% clanker</span></div>';
+  } else {
+    $('res-dist').innerHTML = '';
+  }
+
   const thinEl = $('res-thin');
   thinEl.hidden = !thinAcct;
   if (thinAcct)
@@ -446,10 +460,17 @@ function wireResultButtons(fin, grid, url, live, acct) {
   const hasGrid = grid && grid.length;
 
   if (acct) {
-    // Account result — same layout for the diagnoser and a shared-link
-    // visitor: share (primary) + diagnose someone else (secondary) under the
-    // grid, a lone "take the test yourself" at the bottom. Recipients can
-    // share onward too. (Opt-out is server-side only: /api/remove.)
+    // Account result CTAs depend on the audience: the diagnoser just made
+    // something worth showing off → share leads (primary). A share-link
+    // visitor hasn't played yet → "diagnose someone else" leads (primary,
+    // first) and share demotes to secondary.
+    const visitor = !live;
+    share.classList.toggle('big', !visitor);
+    share.textContent = visitor ? 'share result' : 'share result ▶';
+    share.style.order = visitor ? '2' : '1';
+    diagAgain.classList.toggle('big', visitor);
+    diagAgain.textContent = visitor ? 'diagnose someone else ▶' : 'diagnose someone else';
+    diagAgain.style.order = visitor ? '1' : '2';
     if (hasGrid) {
       share.hidden = false;
       share.onclick = () => shareResult(fin, grid, url, acct);
