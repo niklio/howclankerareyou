@@ -29,16 +29,18 @@ function fail(code, message) {
 // window (per-isolate is fine — every isolate learns within one request).
 let blockedUntil = 0;
 
-// Fetch a user's feed (comments|submitted) with the full protection stack:
+// Fetch a user's feed (comments|submitted) with the protection stack and a
+// weatherproof fallback:
 //   1. 10-min edge cache — retries and repeat lookups never re-hit reddit
-//   2. global outbound ceiling (REDDIT_RL, all users combined) — bursts hit
-//      OUR limiter before reddit's
-//   3. circuit breaker on bot-defense 403s, and NO retries against them
-//      (block windows outlast any backoff; retrying is pure heat)
-// 404 = no such user (definitive null); plain 403 = suspended (null);
-// 429 = per-IP throttle, retried gently.
+//   2. global ceiling (REDDIT_RL) — caps total fetch volume AND Zyte spend
+//   3. direct fetch first (free); reddit throttles Cloudflare's shared
+//      egress IPs in windows ("weather"), so when the direct path is blocked
+//      (breaker open, bot-defense 403, retries exhausted, 5xx) we fall back
+//      to the Zyte API, which fetches through its own clean pool (~1s,
+//      pennies per call, only ever pays during windows)
+//   Set REDDIT_VIA_ZYTE=1 to force Zyte-primary (testing / flipping).
+// 404 = no such user (null); plain 403 = suspended (null).
 async function fetchFeed(env, name, kind = 'comments', retries = 2) {
-  if (Date.now() < blockedUntil) throw fail('upstream', 'reddit cooling down');
   const url = `https://www.reddit.com/user/${name.toLowerCase()}/${kind}.rss`;
 
   const cached = await caches.default.match(url).catch(() => null);
@@ -49,6 +51,30 @@ async function fetchFeed(env, name, kind = 'comments', retries = 2) {
     if (!success) throw fail('upstream', 'reddit fetch budget exhausted');
   }
 
+  let res = null; // { status, body } with reddit's own status
+  const zytePrimary = env?.ZYTE_KEY && env?.REDDIT_VIA_ZYTE === '1';
+  if (!zytePrimary) res = await directGet(url, retries).catch(() => null);
+  if (res && ![200, 403, 404].includes(res.status)) res = null; // 5xx etc → try the fallback
+  if (!res && env?.ZYTE_KEY) res = await zyteGet(env, url).catch(() => null);
+  if (!res) throw fail('upstream', 'reddit feed unavailable');
+
+  if (res.status === 404 || res.status === 403) return null;
+  if (res.status !== 200) throw fail('upstream', `reddit rss ${res.status}`);
+  // Cache positives so retries/repeats are free for 10 minutes.
+  try {
+    await caches.default.put(
+      url,
+      new Response(res.body, { headers: { 'cache-control': 'public, s-maxage=600', 'content-type': 'application/atom+xml' } })
+    );
+  } catch {}
+  return res.body;
+}
+
+// Direct fetch from Workers egress. Bot-defense 403s (HTML block pages) set
+// the breaker and throw immediately — retrying them is pure heat; a plain
+// 403 is account state (suspended) and passes through. 429s retry gently.
+async function directGet(url, retries = 2) {
+  if (Date.now() < blockedUntil) throw fail('upstream', 'reddit cooling down');
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -56,37 +82,43 @@ async function fetchFeed(env, name, kind = 'comments', retries = 2) {
         headers: { 'user-agent': UA },
         signal: AbortSignal.timeout(15_000),
       });
-      if (res.status === 404) return null;
       if (res.status === 403) {
-        // Two very different 403s: reddit's bot defense serves an HTML block
-        // page (throttling), while a suspended account's feed is a plain 403
-        // (account state — definitive null).
         const body = await res.text();
         if (/theme-beta|network security|blocked|<html/i.test(body.slice(0, 500))) {
           blockedUntil = Date.now() + 60_000;
-          throw fail('upstream', 'reddit bot-defense window');
+          throw fail('blocked', 'reddit bot-defense window');
         }
-        return null;
+        return { status: 403, body };
       }
-      if (res.ok) {
-        const text = await res.text();
-        // Cache positives so retries/repeats are free for 10 minutes.
-        try {
-          await caches.default.put(
-            url,
-            new Response(text, { headers: { 'cache-control': 'public, s-maxage=600', 'content-type': 'application/atom+xml' } })
-          );
-        } catch {}
-        return text;
-      }
-      lastErr = new Error(`reddit rss ${res.status}`);
+      if (res.status !== 429) return { status: res.status, body: await res.text() };
+      lastErr = new Error('reddit rss 429');
     } catch (err) {
-      if (err.code === 'upstream') throw err; // breaker set — stop immediately
+      if (err.code === 'blocked') throw err;
       lastErr = err;
     }
     if (attempt < retries) await sleep(900 * 2 ** attempt + Math.random() * 300);
   }
   throw lastErr || fail('upstream', 'reddit feed unavailable');
+}
+
+// Fetch through the Zyte API's pool: upstream status + base64 body come back
+// in JSON. UTF-8 decoded properly (comments are full of emoji).
+async function zyteGet(env, url) {
+  const res = await fetch('https://api.zyte.com/v1/extract', {
+    method: 'POST',
+    headers: {
+      authorization: 'Basic ' + btoa(env.ZYTE_KEY + ':'),
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ url, httpResponseBody: true }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!res.ok) throw new Error(`zyte ${res.status}`);
+  const data = await res.json();
+  const bytes = data.httpResponseBody
+    ? Uint8Array.from(atob(data.httpResponseBody), (c) => c.charCodeAt(0))
+    : new Uint8Array();
+  return { status: data.statusCode, body: new TextDecoder('utf-8').decode(bytes) };
 }
 
 const unescapeXml = (s) =>
