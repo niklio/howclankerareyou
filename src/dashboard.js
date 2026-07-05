@@ -22,7 +22,10 @@ export const DASHBOARD_HTML = `<!doctype html>
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);
   font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-  -webkit-font-smoothing:antialiased}
+  -webkit-font-smoothing:antialiased;
+  /* Reading-only tool: kill long-press selection/callout so touch
+     scrubbing on the charts never fights the text-selection loupe. */
+  -webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 a{color:var(--accent);text-decoration:none}
 header{position:sticky;top:0;z-index:5;background:var(--bg);
   border-bottom:1px solid var(--line);padding:10px 16px 10px}
@@ -102,7 +105,6 @@ function lineChart(series){
     (n?'<circle class="dot" cx="'+lx+'" cy="'+ly+'" r="3"/>':'')+
     '<line class="hline" y1="10" y2="'+(CH-CP)+'" style="display:none"/>'+
     '<circle class="hdot" r="4" style="display:none"/>'+
-    '<text x="'+CP+'" y="12">max '+fmt(max)+'</text>'+
     '<text x="'+CP+'" y="'+(CH-6)+'">'+d0+'</text>'+
     '<text x="'+(CW-CP)+'" y="'+(CH-6)+'" text-anchor="end">'+d1+'</text>'+
     '</svg>';
