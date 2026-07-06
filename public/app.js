@@ -464,15 +464,15 @@ function wireResultButtons(fin, grid, url, live, acct) {
   const take = $('btn-take');
   const again = $('btn-again');
   const diagAgain = $('btn-diag-again');
-  const selfInstead = $('btn-self-instead');
   const optout = $('res-optout');
   const resDiag = $('res-diag');
   // Reset all.
-  for (const b of [share, link, take, again, diagAgain, selfInstead]) b.hidden = true;
+  for (const b of [share, link, take, again, diagAgain]) b.hidden = true;
   optout.hidden = true;
   resDiag.hidden = true;
   $('res-diag-err').hidden = true;
   $('res-diag-input').value = '';
+  $('res-self-link').hidden = true;
 
   const hasGrid = grid && grid.length;
 
@@ -485,8 +485,16 @@ function wireResultButtons(fin, grid, url, live, acct) {
     const visitor = !live;
     if (visitor) {
       // Visitors get the inline diagnose form only — no share button for a
-      // result that isn't theirs (the address bar already IS the link).
+      // result that isn't theirs (the address bar already IS the link) —
+      // plus the homepage's secondary self-test line under the input.
       resDiag.hidden = false;
+      $('res-self-link').hidden = false;
+      $('link-self-res').onclick = (e) => {
+        e.preventDefault();
+        beacon('cta', fin.id, 'self_instead');
+        history.pushState({ view: 'quiz' }, '', '/#self');
+        startSelfTest();
+      };
     } else {
       share.classList.add('big');
       share.textContent = 'share result ▶';
@@ -501,11 +509,6 @@ function wireResultButtons(fin, grid, url, live, acct) {
         location.href = '/';
       };
     }
-    selfInstead.hidden = false;
-    selfInstead.onclick = () => {
-      beacon('cta', fin.id, 'self_instead');
-      location.href = '/#self';
-    };
     optout.hidden = false;
     return;
   }

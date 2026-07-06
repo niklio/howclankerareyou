@@ -225,6 +225,10 @@ h2 {
 
 /* ---- diagnose: homepage search + gathering ---- */
 
+/* The hidden attribute must beat class display rules (.searchbar is flex —
+   without this, a [hidden] searchbar still renders). */
+[hidden] { display: none !important; }
+
 .searchbar {
   display: flex;
   max-width: 560px;
