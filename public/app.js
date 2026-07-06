@@ -82,22 +82,37 @@ $('diag-form').addEventListener('submit', (e) => {
   e.preventDefault();
   runDiagnose();
 });
+// Inline form on shared result pages — same flow, but errors land back on the
+// result page instead of the landing view, and the entry is beaconed so the
+// share→diagnose conversion is measurable against the old nav-home CTA.
+$('res-diag-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  beacon('cta', history.state?.fin?.id, 'diag_inline');
+  runDiagnose({
+    input: $('res-diag-input'),
+    btn: $('btn-res-diagnose'),
+    err: $('res-diag-err'),
+    failView: 'results',
+  });
+});
 $('link-self').addEventListener('click', (e) => {
   e.preventDefault();
   history.pushState({ view: 'quiz' }, '', '/#self');
   startSelfTest();
 });
 
-async function runDiagnose() {
-  const input = $('diag-input').value.trim();
-  const errEl = $('diag-err');
+async function runDiagnose(src) {
+  const inputEl = src?.input || $('diag-input');
+  const errEl = src?.err || $('diag-err');
+  const failView = src?.failView || 'landing';
+  const input = inputEl.value.trim();
   errEl.hidden = true;
   if (!input) {
     errEl.textContent = 'enter an @handle or u/name.';
     errEl.hidden = false;
     return;
   }
-  const btn = $('btn-diagnose');
+  const btn = src?.btn || $('btn-diagnose');
   btn.disabled = true;
   const gen = navGen;
   showGather(guessLabel(input));
@@ -120,10 +135,10 @@ async function runDiagnose() {
       if (gen !== navGen) return;
       stopGather();
       btn.disabled = false;
-      show('landing');
+      show(failView);
       errEl.textContent = diagnoseErrorText(err);
       errEl.hidden = false;
-      $('diag-input').focus();
+      inputEl.focus();
       return;
     }
   }
@@ -451,33 +466,41 @@ function wireResultButtons(fin, grid, url, live, acct) {
   const diagAgain = $('btn-diag-again');
   const selfInstead = $('btn-self-instead');
   const optout = $('res-optout');
+  const resDiag = $('res-diag');
   // Reset all.
   for (const b of [share, link, take, again, diagAgain, selfInstead]) b.hidden = true;
   optout.hidden = true;
+  resDiag.hidden = true;
+  $('res-diag-err').hidden = true;
+  $('res-diag-input').value = '';
 
   const hasGrid = grid && grid.length;
 
   if (acct) {
     // Account result CTAs depend on the audience: the diagnoser just made
     // something worth showing off → share leads (primary). A share-link
-    // visitor hasn't played yet → "diagnose someone" leads (primary, first;
-    // no "else" — they haven't diagnosed anyone) and share demotes to secondary.
+    // visitor hasn't played yet → the inline diagnose form leads (right on
+    // the page — sending them home to type a handle lost ~95% of them) and
+    // share demotes to secondary.
     const visitor = !live;
-    share.classList.toggle('big', !visitor);
-    share.textContent = visitor ? 'share result' : 'share result ▶';
-    share.style.order = visitor ? '2' : '1';
-    diagAgain.classList.toggle('big', visitor);
-    diagAgain.textContent = visitor ? 'diagnose someone ▶' : 'diagnose someone else';
-    diagAgain.style.order = visitor ? '1' : '2';
-    if (hasGrid) {
-      share.hidden = false;
-      share.onclick = () => shareResult(fin, grid, url, acct);
+    if (visitor) {
+      // Visitors get the inline diagnose form only — no share button for a
+      // result that isn't theirs (the address bar already IS the link).
+      resDiag.hidden = false;
+    } else {
+      share.classList.add('big');
+      share.textContent = 'share result ▶';
+      if (hasGrid) {
+        share.hidden = false;
+        share.onclick = () => shareResult(fin, grid, url, acct);
+      }
+      diagAgain.textContent = 'diagnose someone else';
+      diagAgain.hidden = false;
+      diagAgain.onclick = () => {
+        beacon('cta', fin.id, 'diag_again');
+        location.href = '/';
+      };
     }
-    diagAgain.hidden = false;
-    diagAgain.onclick = () => {
-      beacon('cta', fin.id, 'diag_again');
-      location.href = '/';
-    };
     selfInstead.hidden = false;
     selfInstead.onclick = () => {
       beacon('cta', fin.id, 'self_instead');
@@ -500,6 +523,9 @@ function wireResultButtons(fin, grid, url, live, acct) {
     again.textContent = 'take it again';
     again.onclick = () => (location.href = '/#self');
   } else {
+    // Shared self-test: the inline diagnose form leads here too (diagnosing
+    // someone is the lower-friction first play), the self-test stays offered.
+    resDiag.hidden = false;
     take.hidden = false;
     take.onclick = () => {
       beacon('cta', fin.id, 'take_test');
@@ -633,6 +659,7 @@ function esc(s) {
 // input already spells out both platforms.
 if (window.matchMedia && window.matchMedia('(max-width: 560px)').matches) {
   $('diag-input').placeholder = '@handle or u/name';
+  $('res-diag-input').placeholder = '@handle or u/name';
 }
 
 api('/api/status')
