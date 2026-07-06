@@ -268,6 +268,12 @@ h2 {
 .scan .bad { color: var(--accent); }
 #gather-fill { height: 100%; width: 5%; background: var(--accent); transition: width 0.5s ease; }
 
+/* ---- inline diagnose on shared result pages ---- */
+
+#res-diag { margin-top: 34px; }
+#res-diag .searchbar { margin: 12px 0 10px; }
+.res-diag-lead { margin: 0; font-weight: 600; }
+
 /* ---- diagnose: sampled posts on the result page ---- */
 
 .src {

@@ -363,7 +363,7 @@ async function api(request, env, url, ctx) {
   if (request.method === 'POST' && pathname === '/api/event') {
     const body = await request.json().catch(() => ({}));
     if (body.type === 'share') logEvent(env, ctx, request, 'share', { session: body.session });
-    else if (body.type === 'cta' && ['diag_again', 'self_instead', 'take_test'].includes(body.meta))
+    else if (body.type === 'cta' && ['diag_again', 'self_instead', 'take_test', 'diag_inline'].includes(body.meta))
       logEvent(env, ctx, request, 'cta', { session: body.session, meta: body.meta });
     return json({ ok: true });
   }

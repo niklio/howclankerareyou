@@ -120,6 +120,15 @@
       <p class="verdict" id="res-verdict"></p>
       <div id="res-grid"></div>
       <p class="fine" id="grid-legend" hidden>one square per word · <span class="good">green</span> = human · <span class="accent">red</span> = clanker</p>
+      <div id="res-diag" hidden>
+        <p class="res-diag-lead">your turn — drop anyone's <span class="accent">X handle</span> or <span class="accent">reddit u/name</span>:</p>
+        <form class="searchbar" id="res-diag-form">
+          <input id="res-diag-input" type="text" autocomplete="off" autocapitalize="off"
+                 spellcheck="false" placeholder="@handle on X · u/name on reddit" maxlength="22">
+          <button id="btn-res-diagnose" type="submit">diagnose ▶</button>
+        </form>
+        <p class="err" id="res-diag-err" hidden></p>
+      </div>
       <div class="row">
         <button id="btn-share" class="big" hidden>share result ▶</button>
         <button id="btn-diag-again" hidden>diagnose someone else</button>
