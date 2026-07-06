@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>scorer eval · how clanker are you?</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--ink:#16181d;--dim:#69707d;--line:#e3e6ea;
+  --accent:#2f6fed;--soft:#e9effc;--ai:#d93025;--human:#188038;--shadow:0 1px 2px rgba(16,24,40,.05)}
+@media(prefers-color-scheme:dark){:root{--bg:#101318;--card:#1a1f27;--ink:#e8eaee;
+  --dim:#8b94a3;--line:#2a313c;--accent:#6b97f2;--soft:#1f2836;--ai:#e5726a;--human:#5bb974;--shadow:none}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}
+main{max-width:940px;margin:0 auto;padding:24px 16px 80px}
+h1{font-size:20px;font-weight:700;margin:0 0 2px}
+.sub{color:var(--dim);font-size:13px;margin:0 0 20px}
+.row{display:grid;gap:12px;margin-bottom:12px}
+.stats{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+.grid{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px;box-shadow:var(--shadow)}
+.card h3{margin:0 0 10px;font-size:13px;font-weight:600;color:var(--dim)}
+.card h3 b{color:var(--ink);font-variant-numeric:tabular-nums}
+.stat .big{font-size:26px;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.stat .sub2{font-size:12px;color:var(--dim);margin-top:2px}
+.section{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--dim);margin:26px 4px 10px}
+.section .hint{font-weight:400;text-transform:none;letter-spacing:0}
+svg{display:block;width:100%;height:auto}
+.legend{display:flex;gap:16px;font-size:12px;color:var(--dim);margin-top:6px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+.bar{display:flex;align-items:center;gap:10px;margin:6px 0;font-size:13px}
+.bar .lab{width:44%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bar .track{flex:1;height:8px;border-radius:4px;background:var(--soft);overflow:hidden}
+.bar .fill{display:block;height:100%;border-radius:4px;background:var(--accent)}
+.bar .val{min-width:52px;text-align:right;font-weight:600;font-variant-numeric:tabular-nums}
+.method{font-size:13.5px}
+.method p{margin:8px 0}
+.method .muted{color:var(--dim)}
+code{background:var(--soft);border-radius:5px;padding:1px 5px;font-size:12.5px}
+</style>
+</head>
+<body>
+<main>
+<h1>scorer eval</h1>
+<p class="sub">ROC-AUC of the <a href="/">howclankerareyou.com</a> surprisal scorer on three public AI-text detection benchmarks · <span id="gen"></span></p>
+<div id="app"><p class="sub">loading…</p></div>
+</main>
+<script>
+const fmt=(x,d=3)=>x==null?'—':Number(x).toFixed(d);
+const DS_META={
+  raid:{name:'RAID',cite:'Dugan et al. 2024 — 11 generators × 8 domains (no adversarial attacks)'},
+  mage:{name:'MAGE',cite:'Li et al. 2024 — 27 LLMs × 7 writing tasks, test split'},
+  hc3:{name:'HC3',cite:'Guo et al. 2023 — paired human vs ChatGPT answers, same questions'},
+};
+
+function rocSvg(pts, aucLabel){
+  const W=360,H=300,p=34;
+  const X=v=>p+v*(W-2*p), Y=v=>H-p-v*(H-2*p);
+  const path=pts.map((q,i)=>(i?'L':'M')+X(q.fpr).toFixed(1)+','+Y(q.tpr).toFixed(1)).join(' ');
+  let ticks='';
+  for(const v of [0,.5,1]){
+    ticks+='<text x="'+X(v)+'" y="'+(H-p+16)+'" font-size="10" fill="var(--dim)" text-anchor="middle">'+v+'</text>';
+    ticks+='<text x="'+(p-8)+'" y="'+(Y(v)+3)+'" font-size="10" fill="var(--dim)" text-anchor="end">'+v+'</text>';
+  }
+  return '<svg viewBox="0 0 '+W+' '+H+'">'+
+    '<rect x="'+p+'" y="'+p+'" width="'+(W-2*p)+'" height="'+(H-2*p)+'" fill="none" stroke="var(--line)"/>'+
+    '<line x1="'+X(0)+'" y1="'+Y(0)+'" x2="'+X(1)+'" y2="'+Y(1)+'" stroke="var(--line)" stroke-dasharray="4 4"/>'+
+    '<path d="'+path+'" fill="none" stroke="var(--accent)" stroke-width="2.5"/>'+ticks+
+    '<text x="'+(W/2)+'" y="'+(H-4)+'" font-size="11" fill="var(--dim)" text-anchor="middle">false positive rate (humans called clanker)</text>'+
+    '<text x="12" y="'+(H/2)+'" font-size="11" fill="var(--dim)" text-anchor="middle" transform="rotate(-90 12 '+(H/2)+')">true positive rate (AI caught)</text>'+
+    '<text x="'+X(.6)+'" y="'+Y(.08)+'" font-size="13" font-weight="600" fill="var(--ink)">AUC '+aucLabel+'</text>'+
+    '</svg>';
+}
+function histSvg(hA,hH){
+  const W=360,H=190,p=30;
+  const max=Math.max(...hA,...hH,1), bw=(W-2*p)/10;
+  let bars='';
+  for(let i=0;i<10;i++){
+    const a=hA[i]/max*(H-2*p), h=hH[i]/max*(H-2*p);
+    bars+='<rect x="'+(p+i*bw+2)+'" y="'+(H-p-h)+'" width="'+(bw/2-3)+'" height="'+h+'" fill="var(--human)" opacity=".85"/>';
+    bars+='<rect x="'+(p+i*bw+bw/2+1)+'" y="'+(H-p-a)+'" width="'+(bw/2-3)+'" height="'+a+'" fill="var(--ai)" opacity=".85"/>';
+  }
+  let ticks='';
+  for(const v of [0,50,100]) ticks+='<text x="'+(p+(v/100)*(W-2*p))+'" y="'+(H-p+14)+'" font-size="10" fill="var(--dim)" text-anchor="middle">'+v+'%</text>';
+  return '<svg viewBox="0 0 '+W+' '+H+'">'+
+    '<line x1="'+p+'" y1="'+(H-p)+'" x2="'+(W-p)+'" y2="'+(H-p)+'" stroke="var(--line)"/>'+bars+ticks+'</svg>';
+}
+function bars(items){
+  const max=Math.max(...items.map(i=>i.v),0.0001);
+  return items.map(i=>'<div class="bar"><span class="lab" title="'+i.l+'">'+i.l+'</span>'+
+    '<span class="track"><span class="fill" style="width:'+(100*i.v/max)+'%"></span></span>'+
+    '<span class="val">'+i.fmt+'</span></div>').join('');
+}
+
+fetch('/eval-data.json',{cache:'no-store'}).then(r=>r.json()).then(d=>{
+  document.getElementById('gen').textContent='run '+d.generated.slice(0,10);
+  const stat=(big,lab,sub)=>'<div class="card stat"><div class="big">'+big+'</div><div class="sub2">'+lab+(sub?' · '+sub:'')+'</div></div>';
+  let html='<div class="row stats">'+
+    Object.entries(d.datasets).map(([k,ds])=>stat(fmt(ds.auc),DS_META[k].name+' AUC','CI '+fmt(ds.ci[0],2)+'–'+fmt(ds.ci[1],2))).join('')+
+    stat(fmt(d.pooled.auc),'pooled AUC',d.counts.samples+' samples')+
+  '</div>';
+  for(const [k,ds] of Object.entries(d.datasets)){
+    const genRows=Object.entries(ds.byGen).map(([g,v])=>({l:g+' (n='+v.n+')',v:v.auc,fmt:fmt(v.auc)})).sort((a,b)=>b.v-a.v);
+    const domRows=Object.entries(ds.byDomain).map(([g,v])=>({l:g,v:v.auc,fmt:fmt(v.auc)})).sort((a,b)=>b.v-a.v);
+    const modelRows=ds.perModelAuc.map(m=>({l:m.model,v:m.auc||0,fmt:fmt(m.auc)}));
+    html+='<div class="section">'+DS_META[k].name+' <span class="hint">· '+DS_META[k].cite+' · '+ds.ai+' AI / '+ds.human+' human · 5-post simulated-account AUC <b>'+fmt(ds.aucSimAccount)+'</b></span></div>'+
+      '<div class="row grid">'+
+        '<div class="card"><h3>ROC · AUC <b>'+fmt(ds.auc)+'</b> <span style="text-transform:none">(CI '+fmt(ds.ci[0],2)+'–'+fmt(ds.ci[1],2)+')</span></h3>'+rocSvg(ds.roc,fmt(ds.auc))+'</div>'+
+        '<div class="card"><h3>Score distributions · medians: AI <b>'+ds.medians.ai+'</b> · human <b>'+ds.medians.human+'</b></h3>'+histSvg(ds.hist.ai,ds.hist.human)+
+          '<div class="legend"><span><i style="background:var(--human)"></i>human</span><span><i style="background:var(--ai)"></i>AI</span></div></div>'+
+        '<div class="card"><h3>AUC by generator</h3>'+bars(genRows)+'</div>'+
+        (domRows.length?'<div class="card"><h3>AUC by domain</h3>'+bars(domRows)+'</div>':'')+
+        '<div class="card"><h3>AUC by single panel model</h3>'+bars(modelRows)+'</div>'+
+      '</div>';
+  }
+  html+='<div class="section">method</div>'+
+    '<div class="card method">'+
+    '<p><b>Question.</b> Does the production scorer separate LLM writing from human writing on the standard public detection benchmarks?</p>'+
+    '<p><b>Data.</b> ~500 AI + ~500 human samples per benchmark, sampled via the HF datasets-server API: RAID balanced across its 11 generators (adversarial attacks excluded), MAGE from its test split across testbeds, HC3 as paired human/ChatGPT answers to the same questions. Texts truncated to their last 120 words; production’s ≥11-word qualifying rule applies.</p>'+
+    '<p><b>Scoring.</b> Every sample runs through the literal production function (<code>scorePostEcho</code> from <code>src/scoring.js</code>): one echo+logprobs call per (sample × panel model), last-8-words window, token-weighted surprisal, <code>clankerScoreText</code> calibration, overall = nearest model. The “simulated account” AUC groups 5 random same-class samples and aggregates them exactly as the site aggregates an account’s 5 posts.</p>'+
+    '<p><b>Read AUC as:</b> the probability a random AI sample outscores a random human sample. 0.5 = coin flip, 1.0 = perfect.</p>'+
+    '<p class="muted"><b>Known limits.</b> These benchmarks predate 2024: their human text is likely in the panel models’ training data (memorized text → low surprisal → humans skew clanker → AUC <i>underestimates</i>), and their generators are older/smaller than the frontier chat models people actually paste (older models are a different, often easier target). A fresh-human condition would isolate the memorization effect — parked pending these results.</p>'+
+    '</div>';
+  document.getElementById('app').innerHTML=html;
+}).catch(()=>{document.getElementById('app').innerHTML='<p class="sub">no eval data published yet.</p>'});
+</script>
+</body>
+</html>
