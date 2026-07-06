@@ -270,9 +270,8 @@ h2 {
 
 /* ---- inline diagnose on shared result pages ---- */
 
-#res-diag { margin-top: 34px; }
+#res-diag { margin-top: 8px; }
 #res-diag .searchbar { margin: 12px 0 10px; }
-.res-diag-lead { margin: 0; font-weight: 600; }
 
 /* ---- diagnose: sampled posts on the result page ---- */
 
