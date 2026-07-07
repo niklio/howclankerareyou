@@ -184,9 +184,9 @@ function render(d){
     // --- top bar: audience + per-player intensity ---
     '<div class="row stats" style="margin-top:2px">'+
       stat(fmt(t.uniqueVisits),'unique visits')+
-      stat(fmt(t.dau),'DAU','unique players')+
-      stat(fmt(t.playsPerDau),'plays / DAU',fmt(t.plays)+' plays')+
-      stat(fmt(t.sharesPerDau),'shares / DAU',fmt(t.shares)+' shares')+
+      stat(fmt(t.dau),'active users','unique players')+
+      stat(fmt(t.playsPerDau),'plays / active user',fmt(t.plays)+' plays')+
+      stat(fmt(t.sharesPerDau),'shares / active user',fmt(t.shares)+' shares')+
     '</div>'+
     // --- 1. acquisition: who shows up, and from where ---
     section('acquisition')+
