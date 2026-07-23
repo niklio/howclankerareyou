@@ -2,7 +2,9 @@
 
 **A reverse Turing test.** Finish a few sentences, and three language models
 measure the **surprisal** of your writing — how well they predicted each word
-you typed — then tell you how much clanker (robot) is in you.
+you typed — then tell you how much clanker (robot) is in you. A single serverless
+Cloudflare Worker: real model logprobs, calibrated scoring, and a shareable
+Wordle-style grid.
 
 **Live → [howclankerareyou.com](https://howclankerareyou.com)**
 
